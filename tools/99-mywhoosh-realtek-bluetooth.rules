@@ -1,0 +1,4 @@
+# Optional workaround for Realtek 0bda:8771 dongles that time out during scans.
+# Install only when disabling USB autosuspend has helped this hardware.
+# Match the USB identity, so the rule survives port and hci index changes.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="8771", TEST=="power/control", ATTR{power/control}="on"

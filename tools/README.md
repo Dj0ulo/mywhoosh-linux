@@ -50,3 +50,55 @@ is how you find the name to point `ildump.sh` at.
 mcs -out:Types.exe Types.cs
 WINEPREFIX=<prefix> wine Types.exe WindowsConnectivity.dll
 ```
+
+## Optional Realtek Bluetooth autosuspend workaround
+
+For a Realtek USB Bluetooth adapter (`0bda:8771`) that finds no sensors, first
+check whether discovery also fails outside MyWhoosh. Close the game and helper,
+wake the trainer, then run:
+
+```sh
+bluetoothctl --timeout 20 scan le
+journalctl -k --since '-5 min' | grep -Ei 'Bluetooth|hci[0-9]|btusb'
+```
+
+The commands below are run from the repository root. They modify host USB power
+management and are optional; the Lutris installer does not apply this rule.
+
+Command timeouts and USB resets here are below the Wine shim. In one tested
+Realtek `0bda:8771` setup, disabling USB autosuspend stopped repeated resets,
+and a subsequent Bluetooth power cycle restored advertisements. This is an
+observed workaround, not proof that every timeout on this chipset has that cause.
+
+For affected hardware, the optional rule below disables autosuspend for USB
+devices with that vendor/product ID, regardless of port or `hciN` numbering:
+
+```sh
+sudo install -m 0644 tools/99-mywhoosh-realtek-bluetooth.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+It applies on the next device connection or boot. Close Bluetooth applications
+before reconnecting the dongle. To apply it to an already attached dongle without
+disconnecting it:
+
+```sh
+sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=0bda --attr-match=idProduct=8771
+sudo udevadm settle
+```
+
+After closing the game and helper, if scanning remains stuck, cycle Bluetooth
+power and retry the scan. This disconnects Bluetooth devices using the selected
+controller; with multiple controllers, select the intended one in `bluetoothctl`.
+
+```sh
+bluetoothctl power off
+bluetoothctl power on
+```
+
+The launcher never resets the adapter automatically during a ride. To undo the
+persistent workaround, remove `/etc/udev/rules.d/99-mywhoosh-realtek-bluetooth.rules`,
+reload udev rules, and reconnect the dongle. Other power-management software may
+also change USB power settings, so check the device's `power/control` if failures
+return. The kernel documents the setting under
+[USB power management](https://docs.kernel.org/driver-api/usb/power-management.html).
