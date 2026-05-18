@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Fix for BLE (Bluetooth Low Energy) TypeLoadException in MyWhoosh under Wine
+# Fix for BLE (Bluetooth Low Energy) errors in MyWhoosh under Wine
 #
 # Error 1 (fixed): Could not load file or assembly 'Windows, Version=255.255.255.255'
 # Error 2 (fixed): Could not resolve type 'BluetoothLEAdvertisementWatcher' from typeref
 #                  in assembly 'Windows, Version=255.255.255.255'
+# Error 3 (fixed): MissingMethodException: Method not found:
+#                  Windows.Foundation.IAsyncOperation<...> Radio.GetRadiosAsync()
 #
-# Root cause:
+# Root cause of errors 1 & 2:
 #   The game's WindowsConnectivity10.dll references 'Windows, Version=255.255.255.255'
 #   (the union Windows WinRT metadata), which Wine does not provide.
 #
@@ -15,6 +17,12 @@
 #   such as 'Windows.Foundation.UniversalApiContract v1.0.0.0'.  When Mono follows that
 #   forwarder it looks in the GAC for Windows.Foundation.UniversalApiContract — but that
 #   assembly is never installed, so the type still can't be found.
+#
+# Root cause of error 3:
+#   Even with all WinMD types resolved, Wine does not implement the
+#   Windows.Devices.Radios COM server.  When the game's BluetoothProgram.IsBluetoothEnabled()
+#   calls Radio.GetRadiosAsync() via Mono's WinRT/COM bridge, RoGetActivationFactory()
+#   returns an error and Mono converts it to MissingMethodException.
 #
 # Fix:
 #   1. Install Windows.WinMD as Windows.dll so the 'Windows' assembly ref resolves.
@@ -26,6 +34,9 @@
 #      (1.0.0.0) and the version the file declares, ensuring forward and backward
 #      resolution both work.
 #   3. Place every contract DLL alongside the game's BT libraries as a fallback.
+#   4. Patch WindowsConnectivity10.dll: replace the CIL body of IsBluetoothEnabled()
+#      with two instructions — ldc.i4.1 (push 1/true) + ret — so it returns true
+#      unconditionally, bypassing the unimplementable WinRT radio check.
 
 set -e
 
@@ -133,6 +144,42 @@ for dir in "${BT_LIB_DIR}" "${BINARIES_DIR}"; do
     cp "${CACHE_DIR}/Windows.Foundation.FoundationContract.winmd"    "${dir}/Windows.Foundation.FoundationContract.dll"
     cp "${CACHE_DIR}/Windows.Devices.DevicesLowLevelContract.winmd"  "${dir}/Windows.Devices.DevicesLowLevelContract.dll"
 done
+
+# --- Step 7: Patch WindowsConnectivity10.dll: stub out IsBluetoothEnabled() ---
+# Wine does not implement Windows.Devices.Radios, so Radio.GetRadiosAsync() throws
+# MissingMethodException at runtime.  The method IsBluetoothEnabled() is a sync
+# wrapper around the async CheckRadioState() which calls GetRadiosAsync().
+# We patch its CIL body at file offset 0xee8 (code start of the fat-format method)
+# to: ldc.i4.1 (0x17) + ret (0x2a) — return true unconditionally.
+# The remaining 98 bytes of the original body become unreachable dead code and are
+# harmless.  The fat-format header (InitLocals, local var sig) is left unchanged.
+BT_DLL="${BT_LIB_DIR}/WindowsConnectivity10.dll"
+echo "  Patching IsBluetoothEnabled() in WindowsConnectivity10.dll..."
+python3 - "${BT_DLL}" << 'PYEOF'
+import sys, struct
+path = sys.argv[1]
+with open(path, 'rb') as f:
+    data = bytearray(f.read())
+
+# Expected code start offset and first 3 bytes as a sanity guard
+CODE_OFF = 0xee8
+EXPECTED = bytes([0x00, 0x02, 0x28])  # nop; ldarg.0; call
+actual = bytes(data[CODE_OFF:CODE_OFF+3])
+if actual != EXPECTED:
+    # Already patched or unexpected content — skip safely
+    if bytes(data[CODE_OFF:CODE_OFF+2]) == bytes([0x17, 0x2a]):
+        print("    Already patched, skipping.")
+        sys.exit(0)
+    print(f"    WARNING: unexpected bytes at 0x{CODE_OFF:x}: {actual.hex()} — skipping patch.")
+    sys.exit(0)
+
+data[CODE_OFF]   = 0x17  # ldc.i4.1  (push true)
+data[CODE_OFF+1] = 0x2a  # ret
+
+with open(path, 'wb') as f:
+    f.write(data)
+print("    Done.")
+PYEOF
 
 echo ""
 echo "==> Fix applied successfully!"

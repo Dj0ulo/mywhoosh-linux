@@ -58,7 +58,7 @@ WINEPREFIX=~/Documents/mywhoosh-wine/mywhoosh-bottle/MyWhoosh wine MyWhoosh/MyWh
 
 ### The problem
 
-When launching the game you may see one of two errors:
+When launching the game you may see one of three errors:
 
 **Error 1** (assembly not found):
 ```
@@ -77,37 +77,52 @@ System.TypeLoadException: Could not load type of field
   in assembly 'Windows, Version=255.255.255.255, ...')
 ```
 
-**Why it happens:**
+**Error 3** (WinRT COM activation fails at runtime):
+```
+System.MissingMethodException: Method not found:
+  Windows.Foundation.IAsyncOperation<IReadOnlyList<Radio>> Radio.GetRadiosAsync()
+  at BluetoothManager.BluetoothProgram.CheckRadioState()
+  at BluetoothManager.BluetoothProgram.IsBluetoothEnabled()
+```
 
-MyWhoosh uses a .NET DLL (`WindowsConnectivity10.dll`) that talks to BLE sensors via the Windows Runtime (WinRT) API — specifically `Windows.Devices.Bluetooth` and `Windows.Devices.Bluetooth.Advertisement`. In .NET, all WinRT types are accessed through a special assembly called `Windows, Version=255.255.255.255` (the union Windows metadata assembly, `Windows.winmd`).
+**Why they happen:**
 
-Wine ships with only 10 generic WinRT namespace stubs and **does not include `Windows.Devices.*`** (Bluetooth, sensors, enumeration).
+MyWhoosh uses `WindowsConnectivity10.dll`, a .NET assembly that accesses BLE sensors via the Windows Runtime (WinRT) API — specifically `Windows.Devices.Bluetooth` and `Windows.Devices.Radios`. In .NET, all WinRT types are accessed through the assembly `Windows, Version=255.255.255.255` (`Windows.winmd`). Wine ships with only generic WinRT stubs and does not implement the Bluetooth or Radio COM servers.
 
-The `Windows.WinMD` file in Microsoft's NuGet package is **not** a monolithic union assembly — it is a **type-forwarding facade**. Its `ExportedType` table redirects every type (including `BluetoothLEAdvertisementWatcher`) to a *contract assembly* such as `Windows.Foundation.UniversalApiContract`. When Mono follows that forwarder it looks in the GAC for `Windows.Foundation.UniversalApiContract` — but that assembly is never installed, so the type still can't be found (Error 2).
+The `Windows.WinMD` in Microsoft's NuGet package is a **type-forwarding facade**, not a monolithic union assembly. Its `ExportedType` table redirects every WinRT type to a *contract assembly* (e.g. `Windows.Foundation.UniversalApiContract`). Mono follows these forwarders — but those contracts are never installed, producing Errors 1 and 2.
+
+Even after the contracts are installed (resolving type metadata), **Wine has no COM server** for `Windows.Devices.Radios`. When the game's `IsBluetoothEnabled()` calls `Radio.GetRadiosAsync()` via Mono's WinRT/COM bridge, `RoGetActivationFactory` fails and Mono throws Error 3.
 
 ### The fix
 
-`fix-ble.sh` downloads the `Microsoft.Windows.SDK.Contracts` NuGet package and installs four WinMD files so that both the `Windows` assembly reference and all type-forwarder targets resolve correctly:
+`fix-ble.sh` applies two independent fixes:
 
-| Assembly installed | What it provides |
+**Part A — Install WinRT type metadata** (fixes Errors 1 & 2):
+
+Downloads `Microsoft.Windows.SDK.Contracts` from NuGet and installs four WinMD files so the `Windows` assembly ref and all type-forwarder targets resolve:
+
+| Assembly | What it provides |
 |---|---|
-| `Windows` (`Windows.WinMD`) | Resolves the top-level `Windows, v255.255.255.255` assembly ref; contains `ExportedType` forwarders to the contracts below |
-| `Windows.Foundation.UniversalApiContract` | Contains the actual `BluetoothLEAdvertisementWatcher` and the full BLE API type definitions |
+| `Windows` (`Windows.WinMD`) | Resolves `Windows, v255.255.255.255`; forwards all types to contracts below |
+| `Windows.Foundation.UniversalApiContract` | Actual BLE + Radio type definitions (5.6 MB) |
 | `Windows.Foundation.FoundationContract` | Dependency of `UniversalApiContract` |
-| `Windows.Devices.DevicesLowLevelContract` | Dependency referenced by `Windows.WinMD` |
+| `Windows.Devices.DevicesLowLevelContract` | Dependency referenced by the `Windows` facade |
 
-Each is installed in three places:
+Each file is installed in:
+- `Mono GAC/{Name}/{Version}__/` — at both the version the facade expects (1.0.0.0) and the file's declared version
+- `system32/winmetadata/` and `syswow64/winmetadata/` — for WinRT namespace resolution
+- `Content/Libraries/Win64/` and `Binaries/Win64/` — Mono's assembly-directory probing paths
 
-| Location | Why |
-|---|---|
-| `Mono GAC/{Name}/{Version}__/{Name}.dll` | Primary resolution path; installed at both the version the facade expects (1.0.0.0) and the file's actual version |
-| `system32/winmetadata/` + `syswow64/winmetadata/` | WinRT namespace resolution via `RoResolveNamespace` |
-| `Content/Libraries/Win64/` + `Binaries/Win64/` | Mono's ApplicationBase and assembly-directory fallback probing paths |
+**Part B — CIL patch on `WindowsConnectivity10.dll`** (fixes Error 3):
 
-To re-apply after rebuilding the bottle:
+Wine cannot implement `Windows.Devices.Radios` without a full WinRT COM server. Instead, the script patches `IsBluetoothEnabled()` in the DLL directly: replaces its CIL body with two bytes — `ldc.i4.1` + `ret` — so it returns `true` unconditionally. The method's fat-format header and remaining 98 bytes of original code are left in place (unreachable after the early `ret`).
+
+This is safe: the game only queries BLE radio state to guard its sensor-connection path; telling it "Bluetooth is on" causes it to proceed normally.
+
+To re-apply after rebuilding the bottle or updating the game:
 
 ```bash
 ./fix-ble.sh
 ```
 
-The script caches the downloaded NuGet package at `/tmp/mywhoosh-sdk-contracts.nupkg` and extracted WinMDs at `/tmp/mywhoosh-winmd-cache/` so subsequent runs are instant.
+The script caches the NuGet package at `/tmp/mywhoosh-sdk-contracts.nupkg` and the extracted WinMDs at `/tmp/mywhoosh-winmd-cache/` so subsequent runs are instant.
