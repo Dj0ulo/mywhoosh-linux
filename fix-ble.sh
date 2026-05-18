@@ -145,40 +145,37 @@ for dir in "${BT_LIB_DIR}" "${BINARIES_DIR}"; do
     cp "${CACHE_DIR}/Windows.Devices.DevicesLowLevelContract.winmd"  "${dir}/Windows.Devices.DevicesLowLevelContract.dll"
 done
 
-# --- Step 7: Patch WindowsConnectivity10.dll: stub out IsBluetoothEnabled() ---
+# --- Step 7: Patch WindowsConnectivity.dll: stub out IsBluetoothEnabled() ---
 # Wine does not implement Windows.Devices.Radios, so Radio.GetRadiosAsync() throws
 # MissingMethodException at runtime.  The method IsBluetoothEnabled() is a sync
 # wrapper around the async CheckRadioState() which calls GetRadiosAsync().
-# We patch its CIL body at file offset 0xee8 (code start of the fat-format method)
-# to: ldc.i4.1 (0x17) + ret (0x2a) — return true unconditionally.
-# The remaining 98 bytes of the original body become unreachable dead code and are
-# harmless.  The fat-format header (InitLocals, local var sig) is left unchanged.
-BT_DLL="${BT_LIB_DIR}/WindowsConnectivity10.dll"
-echo "  Patching IsBluetoothEnabled() in WindowsConnectivity10.dll..."
+# We patch its CIL body at file offset 0xc50 (code start of the fat-format method
+# in WindowsConnectivity.dll) to: ldc.i4.1 (0x17) + ret (0x2a) — return true
+# unconditionally.  The remaining 69 bytes of the original body become unreachable
+# dead code and are harmless.  The fat-format header is left unchanged.
+BT_DLL="${BT_LIB_DIR}/WindowsConnectivity.dll"
+echo "  Patching IsBluetoothEnabled() in WindowsConnectivity.dll..."
 python3 - "${BT_DLL}" << 'PYEOF'
-import sys, struct
+import sys
 path = sys.argv[1]
 with open(path, 'rb') as f:
     data = bytearray(f.read())
 
-# Expected code start offset and first 3 bytes as a sanity guard
-CODE_OFF = 0xee8
-EXPECTED = bytes([0x00, 0x02, 0x28])  # nop; ldarg.0; call
+CODE_OFF  = 0xc50
+EXPECTED  = bytes([0x02, 0x28, 0x67])  # ldarg.0; call (first 3 bytes of original body)
+PATCHED   = bytes([0x17, 0x2a])         # ldc.i4.1; ret
+
 actual = bytes(data[CODE_OFF:CODE_OFF+3])
-if actual != EXPECTED:
-    # Already patched or unexpected content — skip safely
-    if bytes(data[CODE_OFF:CODE_OFF+2]) == bytes([0x17, 0x2a]):
-        print("    Already patched, skipping.")
-        sys.exit(0)
+if actual == EXPECTED:
+    data[CODE_OFF]   = 0x17
+    data[CODE_OFF+1] = 0x2a
+    with open(path, 'wb') as f:
+        f.write(data)
+    print("    Done.")
+elif bytes(data[CODE_OFF:CODE_OFF+2]) == PATCHED:
+    print("    Already patched, skipping.")
+else:
     print(f"    WARNING: unexpected bytes at 0x{CODE_OFF:x}: {actual.hex()} — skipping patch.")
-    sys.exit(0)
-
-data[CODE_OFF]   = 0x17  # ldc.i4.1  (push true)
-data[CODE_OFF+1] = 0x2a  # ret
-
-with open(path, 'wb') as f:
-    f.write(data)
-print("    Done.")
 PYEOF
 
 echo ""
