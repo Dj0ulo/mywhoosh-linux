@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 # Fix for BLE (Bluetooth Low Energy) TypeLoadException in MyWhoosh under Wine
 #
-# Error: Could not load type of field 'BluetoothManager.BluetoothProgram:advertisment'
-#        due to: Could not load file or assembly 'Windows, Version=255.255.255.255'
+# Error 1 (fixed): Could not load file or assembly 'Windows, Version=255.255.255.255'
+# Error 2 (fixed): Could not resolve type 'BluetoothLEAdvertisementWatcher' from typeref
+#                  in assembly 'Windows, Version=255.255.255.255'
 #
-# Root cause: Wine's WinMetadata directory is missing Windows.Devices.Bluetooth types.
-# The game's WindowsConnectivity10.dll references assembly 'Windows, Version=255.255.255.255'
-# (the union Windows WinRT metadata), which Wine does not provide.
+# Root cause:
+#   The game's WindowsConnectivity10.dll references 'Windows, Version=255.255.255.255'
+#   (the union Windows WinRT metadata), which Wine does not provide.
 #
-# Fix: Download Windows.winmd from Microsoft.Windows.SDK.Contracts NuGet and install it
-# in three locations so Wine's Mono runtime can resolve the 'Windows' assembly reference:
-#   1. Mono GAC (primary — Mono checks this first for named assemblies)
-#   2. WinMetadata directories (for WinRT namespace resolution)
-#   3. Alongside the game DLLs (fallback probing path)
+#   The 'Windows.WinMD' shipped in Microsoft.Windows.SDK.Contracts is a *type-forwarding
+#   facade* — it does not define WinRT types directly. Instead, its ExportedType table
+#   redirects every type (including BluetoothLEAdvertisementWatcher) to a contract assembly
+#   such as 'Windows.Foundation.UniversalApiContract v1.0.0.0'.  When Mono follows that
+#   forwarder it looks in the GAC for Windows.Foundation.UniversalApiContract — but that
+#   assembly is never installed, so the type still can't be found.
+#
+# Fix:
+#   1. Install Windows.WinMD as Windows.dll so the 'Windows' assembly ref resolves.
+#   2. Extract the contract WinMDs that Windows.WinMD forwards types to and install
+#      them in the Mono GAC.  The facade references the contracts at v1.0.0.0; the
+#      files in the NuGet package declare higher versions (10.0, 4.0, 3.0).  Mono
+#      uses directory-based GAC lookup and does not re-validate the file's internal
+#      version, so we install each contract at *both* the version the facade expects
+#      (1.0.0.0) and the version the file declares, ensuring forward and backward
+#      resolution both work.
+#   3. Place every contract DLL alongside the game's BT libraries as a fallback.
 
 set -e
 
@@ -25,46 +38,101 @@ BT_LIB_DIR="${SCRIPT_DIR}/MyWhoosh/MyWhoosh/Content/Libraries/Win64"
 BINARIES_DIR="${SCRIPT_DIR}/MyWhoosh/MyWhoosh/Binaries/Win64"
 
 NUGET_URL="https://www.nuget.org/api/v2/package/Microsoft.Windows.SDK.Contracts/10.0.19041.2"
-CACHE_FILE="/tmp/mywhoosh-Windows.WinMD"
+NUPKG_CACHE="/tmp/mywhoosh-sdk-contracts.nupkg"
+CACHE_DIR="/tmp/mywhoosh-winmd-cache"
 
-echo "==> MyWhoosh BLE fix: installing Windows.winmd"
+echo "==> MyWhoosh BLE fix: installing Windows WinRT metadata"
 
 # --- Step 1: Download the NuGet package if not cached ---
-if [ ! -f "${CACHE_FILE}" ]; then
-    NUPKG="/tmp/mywhoosh-sdk-contracts.nupkg"
+if [ ! -f "${NUPKG_CACHE}" ]; then
     echo "  Downloading Microsoft.Windows.SDK.Contracts..."
-    curl -L -o "${NUPKG}" "${NUGET_URL}" --max-time 120
-    echo "  Extracting Windows.WinMD..."
-    unzip -j -o "${NUPKG}" "ref/netstandard2.0/Windows.WinMD" -d /tmp/
-    mv /tmp/Windows.WinMD "${CACHE_FILE}"
-    rm -f "${NUPKG}"
+    curl -L -o "${NUPKG_CACHE}" "${NUGET_URL}" --max-time 120
 fi
 
-echo "  Windows.WinMD size: $(du -sh "${CACHE_FILE}" | cut -f1)"
+# --- Step 2: Extract WinMD files ---
+mkdir -p "${CACHE_DIR}"
 
-# --- Step 2: Install into Mono GAC (primary resolution path) ---
-# Mono looks here first. Assembly 'Windows, Version=255.255.255.255, PublicKeyToken=null'
-# maps to gac/Windows/255.255.255.255__/Windows.dll
-GAC_ENTRY="${MONO_GAC}/Windows/255.255.255.255__"
-echo "  Installing into Mono GAC: ${GAC_ENTRY}"
-mkdir -p "${GAC_ENTRY}"
-cp "${CACHE_FILE}" "${GAC_ENTRY}/Windows.dll"
+extract_if_missing() {
+    local name="$1"      # e.g. Windows.Foundation.UniversalApiContract
+    local dest="${CACHE_DIR}/${name}.winmd"
+    if [ ! -f "${dest}" ]; then
+        echo "  Extracting ${name}.winmd..."
+        unzip -j -o "${NUPKG_CACHE}" \
+            "ref/netstandard2.0/${name}.winmd" \
+            -d "${CACHE_DIR}/"
+    fi
+}
 
-# --- Step 3: Place Windows.winmd in WinMetadata directories ---
+# Windows.WinMD — the type-forwarding facade that resolves 'Windows, v255.255.255.255'
+# Note: capitalized as 'Windows.WinMD' inside the NuGet zip.
+if [ ! -f "${CACHE_DIR}/Windows.winmd" ]; then
+    echo "  Extracting Windows.WinMD..."
+    unzip -j -o "${NUPKG_CACHE}" "ref/netstandard2.0/Windows.WinMD" -d "${CACHE_DIR}/"
+    mv "${CACHE_DIR}/Windows.WinMD" "${CACHE_DIR}/Windows.winmd"
+fi
+
+# Contract assemblies that Windows.WinMD forwards types into.
+# UniversalApiContract contains the full Bluetooth LE stack.
+# FoundationContract and DevicesLowLevelContract are its dependencies.
+extract_if_missing "Windows.Foundation.UniversalApiContract"
+extract_if_missing "Windows.Foundation.FoundationContract"
+extract_if_missing "Windows.Devices.DevicesLowLevelContract"
+
+echo "  Sizes: $(du -sh ${CACHE_DIR}/*.winmd | awk '{print $2": "$1}' | tr '\n' '  ')"
+
+# Helper: install a WinMD file into the Mono GAC under one or more version directories.
+# Usage: gac_install <winmd_path> <assembly_name> <version> [<version2> ...]
+# Mono GAC path format: {name}/{version}__{pubkeytoken}/ — empty token = just two underscores.
+gac_install() {
+    local src="$1"; shift
+    local asmname="$1"; shift
+    for ver in "$@"; do
+        local entry="${MONO_GAC}/${asmname}/${ver}__"
+        mkdir -p "${entry}"
+        cp "${src}" "${entry}/${asmname}.dll"
+    done
+}
+
+# --- Step 3: Install Windows.WinMD facade into Mono GAC ---
+# Resolves: assembly ref 'Windows, Version=255.255.255.255, PublicKeyToken=null'
+echo "  Installing Windows facade into Mono GAC..."
+gac_install "${CACHE_DIR}/Windows.winmd" "Windows" "255.255.255.255"
+
+# --- Step 4: Install contract assemblies into Mono GAC ---
+# Windows.WinMD's ExportedType table references all three contracts at v1.0.0.0.
+# The files themselves declare higher versions, so we install at both.
+echo "  Installing contract assemblies into Mono GAC..."
+gac_install "${CACHE_DIR}/Windows.Foundation.UniversalApiContract.winmd" \
+    "Windows.Foundation.UniversalApiContract" "1.0.0.0" "10.0.0.0"
+
+gac_install "${CACHE_DIR}/Windows.Foundation.FoundationContract.winmd" \
+    "Windows.Foundation.FoundationContract" "1.0.0.0" "4.0.0.0"
+
+gac_install "${CACHE_DIR}/Windows.Devices.DevicesLowLevelContract.winmd" \
+    "Windows.Devices.DevicesLowLevelContract" "1.0.0.0" "3.0.0.0"
+
+# --- Step 5: Place WinMDs in WinMetadata directories ---
 # Used by WinRT namespace resolution (RoResolveNamespace)
-echo "  Copying to WinMetadata (system32)..."
-cp "${CACHE_FILE}" "${WINMETADATA}/Windows.winmd"
+echo "  Copying to WinMetadata (system32 + syswow64)..."
+for dir in "${WINMETADATA}" "${WINMETADATA_WOW}"; do
+    cp "${CACHE_DIR}/Windows.winmd"                              "${dir}/Windows.winmd"
+    cp "${CACHE_DIR}/Windows.Foundation.UniversalApiContract.winmd" \
+                                                                 "${dir}/Windows.Foundation.UniversalApiContract.winmd"
+    cp "${CACHE_DIR}/Windows.Foundation.FoundationContract.winmd" \
+                                                                 "${dir}/Windows.Foundation.FoundationContract.winmd"
+    cp "${CACHE_DIR}/Windows.Devices.DevicesLowLevelContract.winmd" \
+                                                                 "${dir}/Windows.Devices.DevicesLowLevelContract.winmd"
+done
 
-echo "  Copying to WinMetadata (syswow64)..."
-cp "${CACHE_FILE}" "${WINMETADATA_WOW}/Windows.winmd"
-
-# --- Step 4: Place Windows.dll alongside the game's BT libraries ---
-# Mono also probes the directory of the referencing assembly
-echo "  Copying as Windows.dll next to WindowsConnectivity10.dll..."
-cp "${CACHE_FILE}" "${BT_LIB_DIR}/Windows.dll"
-
-echo "  Copying as Windows.dll next to game executable..."
-cp "${CACHE_FILE}" "${BINARIES_DIR}/Windows.dll"
+# --- Step 6: Place DLLs alongside the game's BT libraries ---
+# Mono also probes the directory of the referencing assembly (ApplicationBase fallback)
+echo "  Copying contract DLLs next to game BT libraries and executable..."
+for dir in "${BT_LIB_DIR}" "${BINARIES_DIR}"; do
+    cp "${CACHE_DIR}/Windows.winmd"                                  "${dir}/Windows.dll"
+    cp "${CACHE_DIR}/Windows.Foundation.UniversalApiContract.winmd"  "${dir}/Windows.Foundation.UniversalApiContract.dll"
+    cp "${CACHE_DIR}/Windows.Foundation.FoundationContract.winmd"    "${dir}/Windows.Foundation.FoundationContract.dll"
+    cp "${CACHE_DIR}/Windows.Devices.DevicesLowLevelContract.winmd"  "${dir}/Windows.Devices.DevicesLowLevelContract.dll"
+done
 
 echo ""
 echo "==> Fix applied successfully!"

@@ -58,33 +58,51 @@ WINEPREFIX=~/Documents/mywhoosh-wine/mywhoosh-bottle/MyWhoosh wine MyWhoosh/MyWh
 
 ### The problem
 
-When launching the game you may see:
+When launching the game you may see one of two errors:
 
+**Error 1** (assembly not found):
 ```
-Unhandled Exception:
 System.TypeLoadException: Could not load type of field
   'BluetoothManager.BluetoothProgram:advertisment' (0) due to:
   Could not load file or assembly
   'Windows, Version=255.255.255.255, Culture=neutral, PublicKeyToken=null'
-  or one of its dependencies.
+```
+
+**Error 2** (type not found inside the assembly):
+```
+System.TypeLoadException: Could not load type of field
+  'BluetoothManager.BluetoothProgram:advertisment' (0) due to:
+  Could not resolve type with token 01000090 from typeref
+  (expected class 'Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher'
+  in assembly 'Windows, Version=255.255.255.255, ...')
 ```
 
 **Why it happens:**
 
-MyWhoosh uses a .NET DLL (`WindowsConnectivity10.dll`) that talks to BLE sensors via the Windows Runtime (WinRT) API — specifically `Windows.Devices.Bluetooth` and `Windows.Devices.Bluetooth.Advertisement`. In .NET, all WinRT types are exposed through a special assembly called `Windows, Version=255.255.255.255` (the union Windows metadata assembly, `Windows.winmd`).
+MyWhoosh uses a .NET DLL (`WindowsConnectivity10.dll`) that talks to BLE sensors via the Windows Runtime (WinRT) API — specifically `Windows.Devices.Bluetooth` and `Windows.Devices.Bluetooth.Advertisement`. In .NET, all WinRT types are accessed through a special assembly called `Windows, Version=255.255.255.255` (the union Windows metadata assembly, `Windows.winmd`).
 
-Wine ships with only 10 generic WinRT namespace metadata files (`windows.storage.winmd`, `windows.ui.winmd`, etc.) and **does not include `Windows.Devices.*`** (Bluetooth, sensors, enumeration). When Mono tries to load `WindowsConnectivity10.dll` it immediately fails because the `Windows` assembly cannot be resolved.
+Wine ships with only 10 generic WinRT namespace stubs and **does not include `Windows.Devices.*`** (Bluetooth, sensors, enumeration).
+
+The `Windows.WinMD` file in Microsoft's NuGet package is **not** a monolithic union assembly — it is a **type-forwarding facade**. Its `ExportedType` table redirects every type (including `BluetoothLEAdvertisementWatcher`) to a *contract assembly* such as `Windows.Foundation.UniversalApiContract`. When Mono follows that forwarder it looks in the GAC for `Windows.Foundation.UniversalApiContract` — but that assembly is never installed, so the type still can't be found (Error 2).
 
 ### The fix
 
-`fix-ble.sh` downloads `Windows.WinMD` from Microsoft's [`Microsoft.Windows.SDK.Contracts`](https://www.nuget.org/packages/Microsoft.Windows.SDK.Contracts/) NuGet package. This file is the complete WinRT type metadata for Windows 10 — it contains every WinRT type definition including the full Bluetooth stack — and installs it in four locations so Wine's Mono runtime can find it:
+`fix-ble.sh` downloads the `Microsoft.Windows.SDK.Contracts` NuGet package and installs four WinMD files so that both the `Windows` assembly reference and all type-forwarder targets resolve correctly:
+
+| Assembly installed | What it provides |
+|---|---|
+| `Windows` (`Windows.WinMD`) | Resolves the top-level `Windows, v255.255.255.255` assembly ref; contains `ExportedType` forwarders to the contracts below |
+| `Windows.Foundation.UniversalApiContract` | Contains the actual `BluetoothLEAdvertisementWatcher` and the full BLE API type definitions |
+| `Windows.Foundation.FoundationContract` | Dependency of `UniversalApiContract` |
+| `Windows.Devices.DevicesLowLevelContract` | Dependency referenced by `Windows.WinMD` |
+
+Each is installed in three places:
 
 | Location | Why |
 |---|---|
-| `Mono GAC/Windows/255.255.255.255__/Windows.dll` | Mono checks the GAC first when resolving named assemblies |
-| `system32/winmetadata/Windows.winmd` | WinRT namespace resolution via `RoResolveNamespace` |
-| `Content/Libraries/Win64/Windows.dll` | Mono probes the directory of the referencing assembly |
-| `MyWhoosh/Binaries/Win64/Windows.dll` | Mono's ApplicationBase fallback probing path |
+| `Mono GAC/{Name}/{Version}__/{Name}.dll` | Primary resolution path; installed at both the version the facade expects (1.0.0.0) and the file's actual version |
+| `system32/winmetadata/` + `syswow64/winmetadata/` | WinRT namespace resolution via `RoResolveNamespace` |
+| `Content/Libraries/Win64/` + `Binaries/Win64/` | Mono's ApplicationBase and assembly-directory fallback probing paths |
 
 To re-apply after rebuilding the bottle:
 
@@ -92,4 +110,4 @@ To re-apply after rebuilding the bottle:
 ./fix-ble.sh
 ```
 
-The script caches the downloaded file at `/tmp/mywhoosh-Windows.WinMD` so subsequent runs are instant.
+The script caches the downloaded NuGet package at `/tmp/mywhoosh-sdk-contracts.nupkg` and extracted WinMDs at `/tmp/mywhoosh-winmd-cache/` so subsequent runs are instant.
