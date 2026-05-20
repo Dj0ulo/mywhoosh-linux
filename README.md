@@ -79,10 +79,12 @@ System.TypeLoadException: Could not load type of field
 
 **Error 3** (WinRT COM activation fails at runtime):
 ```
-System.MissingMethodException: Method not found:
-  Windows.Foundation.IAsyncOperation<IReadOnlyList<Radio>> Radio.GetRadiosAsync()
-  at BluetoothManager.BluetoothProgram.CheckRadioState()
-  at BluetoothManager.BluetoothProgram.IsBluetoothEnabled()
+System.MissingMethodException: Method not found: Windows.Foundation.IAsyncOperation`1<System.Collections.Generic.IReadOnlyList`1<Windows.Devices.Radios.Radio>> Windows.Devices.Radios.Radio.GetRadiosAsync()
+  at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1[TResult].Start[TStateMachine] (TStateMachine& stateMachine)
+  at BluetoothManager.BluetoothProgram.CheckRadioState ()
+  at BluetoothManager.BluetoothProgram.IsBluetoothEnabled ()
+  at FunctionsManager.MyWhoosh.BT_GetModuleState ()
+  at (wrapper native-to-managed) FunctionsManager.MyWhoosh.BT_GetModuleState()
 ```
 
 **Why they happen:**
