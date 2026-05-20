@@ -25,7 +25,7 @@ import random
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 import ssl
@@ -245,12 +245,14 @@ def get_download_links(
     locale: str = "en-US",
     os_sku_id: int = 48,
     os_version: str = "10.0.16184.1001",
+    progress_callback: Optional[Callable[[int], None]] = None
 ) -> List[Dict]:
     release_type = "Retail"
     client_ws_url = "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx"
     fe3_url = "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/secured"
 
     # --- Step 0: Fetch product data ---
+    progress_callback and progress_callback(0)
     product_uri = (
         f"https://storeedgefd.dsx.mp.microsoft.com/v9.0/products/{product_id}"
         "?market=US&locale=en-us&deviceFamily=Windows.Desktop"
@@ -288,6 +290,7 @@ def get_download_links(
     wu_category_id = str(data_obj["WuCategoryId"])
 
     # --- Step 1: Get Cookie ---
+    progress_callback and progress_callback(25)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     created = _fmt(now)
     cookie_offset = random.randint(-21600, 21600)
@@ -322,6 +325,7 @@ def get_download_links(
     cookie_value = encrypted_data_el.text
 
     # --- Step 2: SyncUpdates ---
+    progress_callback and progress_callback(50)
     non_leaf_xml = _build_int_list(INSTALLED_NON_LEAF_UPDATE_IDS, "InstalledNonLeafUpdateIDs")
     other_cached_xml = _build_int_list(OTHER_CACHED_UPDATE_IDS, "OtherCachedUpdateIDs")
     dev_attrs = _device_attributes(locale, os_sku_id, os_version)
@@ -428,6 +432,7 @@ def get_download_links(
         sys.exit(1)
 
     # --- Step 3: GetExtendedUpdateInfo2 ---
+    progress_callback and progress_callback(75)
     fe3_headers = {
         "action": "GetExtendedUpdateInfo2",
         "message_id": "2cc99c2e-3b3e-4fb1-9e31-0cd30e6f43a0",
@@ -474,6 +479,7 @@ def get_download_links(
         for p in packages
         if p.url and (not architecture or p.architecture in (architecture, "neutral"))
     ]
+    progress_callback and progress_callback(100)
     return final
 
 
