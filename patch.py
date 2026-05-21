@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import os
 import sys
 from pathlib import Path
@@ -15,7 +17,7 @@ def rename_exe(root_directory: Path):
     MyWhoosh\\
     CreateProcess() returned 2.
     """
-
+    print("Renaming MyWhoosh executable...")
     parent_dir = root_directory / "MyWhoosh" / "Binaries" / "Win64"
     original_file = parent_dir / "MyWhoosh.exe"
     new_file = parent_dir / "MyWhoosh-Win64-Shipping.exe"
@@ -43,6 +45,7 @@ def patch_windows_connectivity_dll(root_directory: Path):
     at FunctionsManager.MyWhoosh.BT_GetModuleState ()
     at (wrapper native-to-managed) FunctionsManager.MyWhoosh.BT_GetModuleState()
     """
+    print("Patching WindowsConnectivity.dll to bypass Bluetooth state check...")
     dll_path = root_directory / "MyWhoosh" / "Content" / "Libraries" / "Win64" / "WindowsConnectivity.dll"
     with open(dll_path, 'rb') as f:
         data = bytearray(f.read())
@@ -57,14 +60,14 @@ def patch_windows_connectivity_dll(root_directory: Path):
         data[CODE_OFF+1] = 0x2a
         with open(dll_path, 'wb') as f:
             f.write(data)
-        print("    Done.")
     elif bytes(data[CODE_OFF:CODE_OFF+2]) == PATCHED:
-        print("    Already patched, skipping.")
+        print("Already patched, skipping.")
     else:
-        print(f"    WARNING: unexpected bytes at 0x{CODE_OFF:x}: {actual.hex()} — skipping patch.")
+        print(f"WARNING: unexpected bytes at 0x{CODE_OFF:x}: {actual.hex()} — skipping patch.")
 
 
 def patch_mywhoosh(root_directory: Path):
+    print("Patching MyWhoosh to make it work with Wine...")
     rename_exe(root_directory)
     patch_windows_connectivity_dll(root_directory)
 
@@ -72,6 +75,7 @@ def patch_mywhoosh(root_directory: Path):
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python patch.py <root_directory>")
+        exit(1)
     else:
         root_directory = Path(sys.argv[1])
         patch_mywhoosh(root_directory)

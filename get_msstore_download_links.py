@@ -238,6 +238,30 @@ def _find_ancestor_id(doc: ET.Element, target: ET.Element, depth: int) -> Option
                 return child.text
     return None
 
+def _find_update_identity_for_secfrag(
+    doc: ET.Element, sec_el: ET.Element
+) -> Tuple[Optional[str], Optional[str]]:
+    """Find UpdateID and RevisionNumber from the UpdateIdentity sibling of a SecuredFragment.
+
+    Structure: SecuredFragment -> Properties -> Xml -> UpdateIdentity (attrs: UpdateID, RevisionNumber)
+    Go 2 levels up from SecuredFragment to reach the Xml element, then get its first child.
+    """
+    parent_map = {child: parent for parent in doc.iter() for child in parent}
+    current = sec_el
+    for _ in range(2):
+        current = parent_map.get(current)
+        if current is None:
+            return None, None
+    # current is the Xml element; its first child should be UpdateIdentity
+    first_child = list(current)
+    if not first_child:
+        return None, None
+    identity_el = first_child[0]
+    # UpdateID and RevisionNumber are attributes of UpdateIdentity, not child elements
+    update_id = identity_el.get("UpdateID")
+    revision = identity_el.get("RevisionNumber")
+    return update_id, revision
+
 
 def get_download_links(
     product_id: str,
@@ -481,31 +505,6 @@ def get_download_links(
     ]
     progress_callback and progress_callback(100)
     return final
-
-
-def _find_update_identity_for_secfrag(
-    doc: ET.Element, sec_el: ET.Element
-) -> Tuple[Optional[str], Optional[str]]:
-    """Find UpdateID and RevisionNumber from the UpdateIdentity sibling of a SecuredFragment.
-
-    Structure: SecuredFragment -> Properties -> Xml -> UpdateIdentity (attrs: UpdateID, RevisionNumber)
-    Go 2 levels up from SecuredFragment to reach the Xml element, then get its first child.
-    """
-    parent_map = {child: parent for parent in doc.iter() for child in parent}
-    current = sec_el
-    for _ in range(2):
-        current = parent_map.get(current)
-        if current is None:
-            return None, None
-    # current is the Xml element; its first child should be UpdateIdentity
-    first_child = list(current)
-    if not first_child:
-        return None, None
-    identity_el = first_child[0]
-    # UpdateID and RevisionNumber are attributes of UpdateIdentity, not child elements
-    update_id = identity_el.get("UpdateID")
-    revision = identity_el.get("RevisionNumber")
-    return update_id, revision
 
 
 def main() -> None:
