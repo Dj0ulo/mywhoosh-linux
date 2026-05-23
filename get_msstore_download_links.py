@@ -23,7 +23,6 @@ import argparse
 import base64
 import hashlib
 import json
-import os
 import pathlib
 import platform
 import random
@@ -526,6 +525,7 @@ def get_download_links(
         packages = list(best.values())
 
     # --- Step 3: GetExtendedUpdateInfo2 ---
+    # Packages are batched in groups of 10 to balance request size and round-trips.
     fe3_headers = {
         "action": "GetExtendedUpdateInfo2",
         "message_id": "2cc99c2e-3b3e-4fb1-9e31-0cd30e6f43a0",
@@ -534,15 +534,21 @@ def get_download_links(
         "expires": expires_sync,
         "ticket_token": release_type,
     }
-
-    for pkg in packages:
-        progress_callback and progress_callback(75 + (25 * packages.index(pkg) // len(packages)))
-        fe3_resp = _soap_post(fe3_url, fe3_headers, f"""
-            <updateIDs>
-                <UpdateIdentity>
+    batch_size = 10
+    digest_to_url: Dict[str, str] = {}
+    for batch_start in range(0, len(packages), batch_size):
+        batch = packages[batch_start:batch_start + batch_size]
+        progress_callback and progress_callback(75 + 25 * batch_start // len(packages))
+        update_ids_xml = "\n".join(
+            f"""            <UpdateIdentity>
                     <UpdateID>{pkg.update_id}</UpdateID>
                     <RevisionNumber>{pkg.revision}</RevisionNumber>
-                </UpdateIdentity>
+                </UpdateIdentity>"""
+            for pkg in batch
+        )
+        fe3_resp = _soap_post(fe3_url, fe3_headers, f"""
+            <updateIDs>
+{update_ids_xml}
             </updateIDs>
             <infoTypes>
                 <XmlUpdateFragmentType>FileUrl</XmlUpdateFragmentType>
@@ -550,20 +556,22 @@ def get_download_links(
             </infoTypes>
             <deviceAttributes>{dev_attrs}</deviceAttributes>
         """)
-
-        # Match the FileLocation by FileDigest so we get the real package URL,
-        # not the blockmap/metadata .cab which may appear first in the response.
         for el in fe3_resp.iter():
             if el.tag.endswith("}FileLocation") or el.tag == "FileLocation":
                 children = {
                     (c.tag.split("}")[1] if "}" in c.tag else c.tag): c.text
                     for c in el
                 }
-                file_digest = children.get("FileDigest")
+                fd = children.get("FileDigest")
                 url = children.get("Url")
-                if url and (pkg.digest is None or file_digest == pkg.digest):
-                    pkg.url = url
-                    break
+                if fd and url and fd not in digest_to_url:
+                    digest_to_url[fd] = url
+
+    for pkg in packages:
+        if pkg.digest and pkg.digest in digest_to_url:
+            pkg.url = digest_to_url[pkg.digest]
+        elif not pkg.digest and digest_to_url:
+            pkg.url = next(iter(digest_to_url.values()))
 
     final = [
         {"FileName": p.file_name, "Architecture": p.architecture, "Url": p.url, "Digest": p.sha256}
