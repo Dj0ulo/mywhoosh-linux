@@ -6,7 +6,6 @@ using static ConnectivityConstants.DelegateCallbacks;
 
 class Program {
     static void Main() {
-        // --- Init ---
         try {
             MyWhoosh.BT_RegisterDelegates(
                 msg             => Console.WriteLine($"[LOG] {msg}"),
@@ -14,7 +13,7 @@ class Program {
                 (dt, r)         => Console.WriteLine($"[DISCONNECT] {dt} result={r}"),
                 sd              => {},
                 antId           => {},
-                cd              => {}
+                cd              => Console.WriteLine($"[DATA] HR={cd.heartRate} Power={cd.power} Cadence={cd.cadence}")
             );
             MyWhoosh.BT_InitBluetoothManager();
             Console.WriteLine("[INIT] BluetoothManager initialized");
@@ -23,7 +22,6 @@ class Program {
             return;
         }
 
-        // --- Module state ---
         try {
             bool state = MyWhoosh.BT_GetModuleState();
             Console.WriteLine($"[MODULE STATE] => {state}");
@@ -33,19 +31,17 @@ class Program {
             return;
         }
 
-        // --- Scan ---
-        Console.WriteLine("[SCAN] Starting scan for all device types...");
+        Console.WriteLine("[SCAN] Scanning for heart rate sensors...");
         try {
-            MyWhoosh.BT_StartScanningAll();
+            MyWhoosh.BT_StartScanning(EDeviceTypeEnum.E_HeartRate);
         } catch (Exception ex) {
             Console.WriteLine($"[SCAN] {ex.GetType().Name}: {ex.Message}");
             return;
         }
 
-        Console.WriteLine("[SCAN] Waiting 5s...");
-        Thread.Sleep(5000);
+        Console.WriteLine("[SCAN] Waiting 15s...");
+        Thread.Sleep(15000);
 
-        // --- Results ---
         try {
             DeviceInformationStruct[] devices = null;
             int count = MyWhoosh.BT_GetScannedDevicesList(out devices);
@@ -57,23 +53,12 @@ class Program {
             Console.WriteLine($"[SCANNED DEVICES] {ex.GetType().Name}: {ex.Message}");
         }
 
-        try {
-            DeviceInformationStruct[] devices = null;
-            int count = MyWhoosh.BT_GetConnectedDevicesList(out devices);
-            Console.WriteLine($"\n[CONNECTED DEVICES] count={count}");
-            if (devices != null)
-                foreach (var d in devices)
-                    PrintDevice(d);
-        } catch (Exception ex) {
-            Console.WriteLine($"[CONNECTED DEVICES] {ex.GetType().Name}: {ex.Message}");
-        }
-
-        MyWhoosh.BT_StopScanningAll();
+        MyWhoosh.BT_StopScanning();
     }
 
     static void PrintDevice(DeviceInformationStruct d) {
         Console.WriteLine($"  Name={d.deviceName} UUID={d.deviceUuid} Type={d.deviceType} Protocol={d.hardwareProtocolType}");
-        Console.WriteLine($"    Connected={d.isConnected} Power={d.hasPower} Cadence={d.hasCadence} Heart={d.hasHeart} Speed={d.hasSpeed} Controllable={d.hasControllable}");
-        Console.WriteLine($"    Model={d.modelNumber} Serial={d.serialNumber} Manufacturer={d.manufactureName} Display={d.displayValue}");
+        Console.WriteLine($"    Connected={d.isConnected} Heart={d.hasHeart} Power={d.hasPower} Cadence={d.hasCadence}");
+        Console.WriteLine($"    Manufacturer={d.manufactureName} Model={d.modelNumber} Display={d.displayValue}");
     }
 }
