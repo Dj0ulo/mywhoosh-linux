@@ -20,9 +20,14 @@ Examples:
 """
 
 import argparse
+import base64
+import hashlib
 import json
+import os
+import pathlib
 import random
 import sys
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -262,6 +267,20 @@ def _find_update_identity_for_secfrag(
     update_id = identity_el.get("UpdateID")
     revision = identity_el.get("RevisionNumber")
     return update_id, revision
+
+def _bar_animation(percent):
+    """Simple terminal progress bar animation [=====     ]"""
+    bar_length = 30
+    filled_length = int(bar_length * percent // 100)
+    return f"[{'=' * filled_length}{' ' * (bar_length - filled_length)}] {percent}%"
+
+def _fetch_links_progress_callback(percent):
+    """Custom progress bar hook for get_download_links"""
+    if percent < 100:       
+        sys.stdout.write(f"\r-> Fetching download link: {_bar_animation(percent)}")
+    else:
+        sys.stdout.write(f"\r-> Fetching download link: {_bar_animation(100)}\n")
+    sys.stdout.flush()
 
 
 def get_download_links(
@@ -519,6 +538,84 @@ def get_download_links(
     return final
 
 
+def _verify_sha256(filepath: pathlib.Path, digest_b64: str) -> bool:
+    """Return True if the file's SHA256 matches the base64-encoded digest."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return base64.b64encode(h.digest()).decode() == digest_b64
+
+
+def download_packages(
+    packages: List[Dict],
+    download_dir: pathlib.Path,
+    extract_dir: Optional[pathlib.Path] = None,
+) -> None:
+    """Download packages to *download_dir*, skipping files that already exist with a matching
+    SHA256 digest.  If *extract_dir* is given, each package is also extracted into a
+    subdirectory named after the package file stem (without extension).
+
+    .msix / .appx / .msixbundle / .appxbundle files are ZIP archives and are extracted with
+    the standard :mod:`zipfile` module.
+    """
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    for pkg in packages:
+        file_name = pkg["FileName"]
+        url = pkg["Url"]
+        digest = pkg.get("Digest")  # SHA256 base64, may be None
+        dest = download_dir / file_name
+        part = dest.with_suffix(dest.suffix + ".part")
+
+        if dest.exists() and digest and _verify_sha256(dest, digest):
+            print(f"  Skip  {file_name} (cached, digest OK)")
+        else:
+            if not digest:
+                print(f"  Warning: no SHA256 digest available for {file_name} — cannot verify integrity", file=sys.stderr)
+
+            print(f"  Downloading {file_name} ...")
+            try:
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    downloaded = 0
+                    with open(part, "wb") as out:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                pct = downloaded * 100 // total
+                                print(f"\r    {pct:3d}%", end="", flush=True)
+                print(f"\r    100%  {downloaded / 1_048_576:.1f} MB")
+            except Exception as exc:
+                part.unlink(missing_ok=True)
+                print(f"  Error: download failed for {file_name}: {exc}", file=sys.stderr)
+                continue
+
+            if digest and not _verify_sha256(part, digest):
+                part.unlink(missing_ok=True)
+                print(f"  Error: digest mismatch for {file_name} — file deleted", file=sys.stderr)
+                continue
+
+            part.replace(dest)
+
+        if extract_dir is not None:
+            pkg_extract_dir = extract_dir / pathlib.Path(file_name).stem
+            pkg_extract_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  Extracting {file_name} -> {pkg_extract_dir}")
+            try:
+                with zipfile.ZipFile(dest, "r") as zf:
+                    zf.extractall(pkg_extract_dir)
+                print(f"    Done ({len(list(pkg_extract_dir.iterdir()))} items)")
+            except zipfile.BadZipFile as exc:
+                print(f"  Error: could not extract {file_name}: {exc}", file=sys.stderr)
+
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Retrieve direct download links for Microsoft Store apps."
@@ -537,7 +634,37 @@ def main() -> None:
     parser.add_argument("--locale", default="en-US", help="Locale for device attributes (default: en-US)")
     parser.add_argument("--os-sku-id", type=int, default=48, help="OS SKU ID (default: 48)")
     parser.add_argument("--os-version", default="10.0.16184.1001", help="Windows OS version string (default: 10.0.16184.1001)")
+    parser.add_argument(
+        "--download",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="Download packages. Optionally specify download directory (default: ~/Downloads)",
+    )
+    parser.add_argument(
+        "--extract",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="Extract packages after downloading. Optionally specify extract directory (default: download directory)",
+    )
     args = parser.parse_args()
+
+    # Resolve --download / --extract paths
+    download_dir: Optional[pathlib.Path] = None
+    if args.download is not None:
+        raw = args.download
+        download_dir = (pathlib.Path(raw) if raw else pathlib.Path.home() / "Downloads").expanduser().resolve()
+
+    extract_dir: Optional[pathlib.Path] = None
+    if args.extract is not None:
+        if download_dir is None:
+            print("Error: --extract requires --download", file=sys.stderr)
+            sys.exit(1)
+        raw = args.extract
+        extract_dir = (pathlib.Path(raw) if raw else download_dir).expanduser().resolve()
 
     results = get_download_links(
         product_id=args.product_id,
@@ -546,6 +673,7 @@ def main() -> None:
         os_sku_id=args.os_sku_id,
         os_version=args.os_version,
         main_only=not args.all_packages,
+        progress_callback=_fetch_links_progress_callback
     )
 
     if not results:
@@ -559,6 +687,10 @@ def main() -> None:
         if pkg.get("Digest"):
             print(f"Digest:       {pkg['Digest']} (SHA256)")
         print()
+
+    if download_dir is not None:
+        print(f"Downloading to {download_dir} ...")
+        download_packages(results, download_dir, extract_dir)
 
 
 if __name__ == "__main__":
