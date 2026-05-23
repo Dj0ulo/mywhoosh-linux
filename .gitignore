@@ -1,2 +1,9 @@
 MyWhoosh/
+MyWhoosh-old/
 mywhoosh-bottle/
+mywhoosh-ghidra/
+*.dll
+*.exe
+*.pyc
+*.Msix
+.vscode
