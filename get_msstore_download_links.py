@@ -142,7 +142,8 @@ OTHER_CACHED_UPDATE_IDS = [
 class PackageInfo:
     id: str
     file_name: str
-    digest: Optional[str] = None
+    digest: Optional[str] = None      # SHA1, used to match FileLocation in FE3 response
+    sha256: Optional[str] = None      # SHA256 (AdditionalDigest), for integrity verification
     update_id: Optional[str] = None
     revision: Optional[str] = None
     url: Optional[str] = None
@@ -269,6 +270,7 @@ def get_download_links(
     locale: str = "en-US",
     os_sku_id: int = 48,
     os_version: str = "10.0.16184.1001",
+    main_only: bool = True,
     progress_callback: Optional[Callable[[int], None]] = None
 ) -> List[Dict]:
     release_type = "Retail"
@@ -312,6 +314,9 @@ def get_download_links(
 
     data_obj = json.loads(fulfillment_data_raw)
     wu_category_id = str(data_obj["WuCategoryId"])
+    # Package name prefix used to identify the main package vs bundled dependencies
+    package_family_name: str = data_obj.get("PackageFamilyName", "")
+    main_package_prefix = package_family_name.split("_")[0] if package_family_name else ""
 
     # --- Step 1: Get Cookie ---
     progress_callback and progress_callback(25)
@@ -419,7 +424,12 @@ def get_download_links(
                 continue  # skip blockmap/metadata files (no InstallerSpecificIdentifier)
             file_name_attr = file_el.get("FileName", "")
             file_name = f"{installer_id}_{file_name_attr}"
-            digest = file_el.get("Digest")
+            digest = file_el.get("Digest")  # SHA1, for URL matching
+            sha256 = next(
+                (c.text for c in file_el if c.get("Algorithm") == "SHA256" and
+                 (c.tag.endswith("}AdditionalDigest") or c.tag == "AdditionalDigest")),
+                None,
+            )
 
             pkg_id = _find_ancestor_id(doc2, files_el, depth=2)
 
@@ -435,7 +445,7 @@ def get_download_links(
             elif "_neutral_" in file_name:
                 arch = "neutral"
 
-            packages.append(PackageInfo(id=pkg_id or "", file_name=file_name, digest=digest, architecture=arch))
+            packages.append(PackageInfo(id=pkg_id or "", file_name=file_name, digest=digest, sha256=sha256, architecture=arch))
 
     # Collect UpdateID + Revision from <SecuredFragment> elements
     for sec_el in doc2.iter():
@@ -499,9 +509,11 @@ def get_download_links(
                     break
 
     final = [
-        {"FileName": p.file_name, "Architecture": p.architecture, "Url": p.url}
+        {"FileName": p.file_name, "Architecture": p.architecture, "Url": p.url, "Digest": p.sha256}
         for p in packages
-        if p.url and (not architecture or p.architecture in (architecture, "neutral"))
+        if p.url
+        and (not architecture or p.architecture in (architecture, "neutral"))
+        and (not main_only or not main_package_prefix or p.file_name.startswith(main_package_prefix))
     ]
     progress_callback and progress_callback(100)
     return final
@@ -517,6 +529,11 @@ def main() -> None:
         choices=["x86", "x64", "arm", "arm64", "neutral"],
         help="Filter packages by architecture",
     )
+    parser.add_argument(
+        "--all-packages",
+        action="store_true",
+        help="Include bundled dependency packages, not just the main app package",
+    )
     parser.add_argument("--locale", default="en-US", help="Locale for device attributes (default: en-US)")
     parser.add_argument("--os-sku-id", type=int, default=48, help="OS SKU ID (default: 48)")
     parser.add_argument("--os-version", default="10.0.16184.1001", help="Windows OS version string (default: 10.0.16184.1001)")
@@ -528,6 +545,7 @@ def main() -> None:
         locale=args.locale,
         os_sku_id=args.os_sku_id,
         os_version=args.os_version,
+        main_only=not args.all_packages,
     )
 
     if not results:
@@ -538,6 +556,8 @@ def main() -> None:
         print(f"FileName:     {pkg['FileName']}")
         print(f"Architecture: {pkg['Architecture']}")
         print(f"Url:          {pkg['Url']}")
+        if pkg.get("Digest"):
+            print(f"Digest:       {pkg['Digest']} (SHA256)")
         print()
 
 
