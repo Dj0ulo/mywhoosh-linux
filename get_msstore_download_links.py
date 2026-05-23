@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import random
 import sys
 import zipfile
@@ -38,6 +39,22 @@ import urllib.request
 import urllib.error
 
 _SSL_CTX = ssl._create_unverified_context()
+
+_MACHINE_TO_ARCH = {
+    "x86_64": "x64",
+    "amd64": "x64",
+    "i386": "x86",
+    "i686": "x86",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "armv7l": "arm",
+    "armv6l": "arm",
+}
+
+def _current_arch() -> str:
+    """Return the MS Store architecture name for the current machine."""
+    return _MACHINE_TO_ARCH.get(platform.machine().lower(), "x64")
+
 
 INSTALLED_NON_LEAF_UPDATE_IDS = [
     1, 2, 3, 11, 19, 544, 549, 2359974, 2359977, 5169044, 8788830,
@@ -668,7 +685,7 @@ def main() -> None:
 
     results = get_download_links(
         product_id=args.product_id,
-        architecture=args.architecture,
+        architecture=args.architecture or _current_arch(),
         locale=args.locale,
         os_sku_id=args.os_sku_id,
         os_version=args.os_version,
