@@ -459,7 +459,10 @@ def get_download_links(
             if not installer_id:
                 continue  # skip blockmap/metadata files (no InstallerSpecificIdentifier)
             file_name_attr = file_el.get("FileName", "")
-            file_name = f"{installer_id}_{file_name_attr}"
+            # Strip __PublisherHash blob: InstallerSpecificIdentifier is "Name_Version_Arch__Publisher"
+            name_ver_arch = installer_id.split("__")[0]
+            ext = pathlib.Path(file_name_attr).suffix or ".msix"
+            file_name = f"{name_ver_arch}{ext}"
             digest = file_el.get("Digest")  # SHA1, for URL matching
             sha256 = next(
                 (c.text for c in file_el if c.get("Algorithm") == "SHA256" and
@@ -469,17 +472,9 @@ def get_download_links(
 
             pkg_id = _find_ancestor_id(doc2, files_el, depth=2)
 
-            arch = None
-            if "_x64_" in file_name:
-                arch = "x64"
-            elif "_x86_" in file_name:
-                arch = "x86"
-            elif "_arm64_" in file_name:
-                arch = "arm64"
-            elif "_arm_" in file_name:
-                arch = "arm"
-            elif "_neutral_" in file_name:
-                arch = "neutral"
+            # Arch is the last underscore-separated segment of Name_Version_Arch
+            arch_part = name_ver_arch.split("_")[-1]
+            arch = arch_part if arch_part in ("x64", "x86", "arm64", "arm", "neutral") else None
 
             packages.append(PackageInfo(id=pkg_id or "", file_name=file_name, digest=digest, sha256=sha256, architecture=arch))
 
