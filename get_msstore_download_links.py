@@ -317,7 +317,7 @@ def get_download_links(
     os_sku_id: int = 48,
     os_version: str = "10.0.16184.1001",
     main_only: bool = True,
-    progress_callback: Optional[Callable[[int], None]] = None
+    progress_callback: Optional[Callable[[int], None]] = _fetch_links_progress_callback
 ) -> List[Dict]:
     release_type = "Retail"
     client_ws_url = "https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx"
@@ -726,13 +726,14 @@ def main() -> None:
         print("No download links found.", file=sys.stderr)
         sys.exit(1)
 
-    for pkg in results:
-        print(f"FileName:     {pkg['FileName']}")
-        print(f"Architecture: {pkg['Architecture']}")
-        print(f"Url:          {pkg['Url']}")
-        if pkg.get("Digest"):
-            print(f"Digest:       {pkg['Digest']} (SHA256)")
-        print()
+    if download_dir is None:
+        for pkg in results:
+            print(f"FileName:     {pkg['FileName']}")
+            print(f"Architecture: {pkg['Architecture']}")
+            print(f"Url:          {pkg['Url']}")
+            if pkg.get("Digest"):
+                print(f"Digest:       {pkg['Digest']} (SHA256)")
+            print()
 
     if download_dir is not None:
         print(f"Downloading to {download_dir} ...")

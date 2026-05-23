@@ -7,14 +7,21 @@ fi
 
 mkdir -p "$1"
 
-mywhoosh="$1/mywhoosh"
 prefix="$1/wineprefix"
 
-if [ ! -d "$mywhoosh/MyWhoosh/Binaries/Win64" ]; then
-    ./mywhoosh.py "$mywhoosh" || { exit 1; }
+mywhoosh_dir="$1/mywhoosh"
+if [ ! -d "$mywhoosh_dir" ]; then
+    mkdir -p "$mywhoosh_dir"
 fi
-if [ ! -f "$mywhoosh/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe" ]; then
-    ./patch.py "$mywhoosh" || { exit 1; }
+mywhoosh_last_version_dir="$mywhoosh_dir/$(ls -1 "$mywhoosh_dir" | sort -V | tail -1)"
+mywhoosh_ms_store_id="9ndh0f2vhzx2"
+
+if [ ! -d "$mywhoosh_last_version_dir/MyWhoosh/Binaries/Win64" ]; then
+    ./get_msstore_download_links.py "$mywhoosh_ms_store_id" --download --extract "$mywhoosh_dir" || { exit 1; }
+    mywhoosh_last_version_dir="$mywhoosh_dir/$(ls -1 "$mywhoosh_dir" | sort -V | tail -1)"
+fi
+if [ ! -f "$mywhoosh_last_version_dir/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe" ]; then
+    ./patch.py "$mywhoosh_last_version_dir" || { exit 1; }
 fi
 
 mkdir -p "$prefix"
@@ -29,7 +36,7 @@ fi
 
 cat > "$1/start_mywhoosh.sh" << 'EOF'
 #!/bin/bash
-WINEPREFIX="$(dirname "$0")/wineprefix" wine "$(dirname "$0")/mywhoosh/mywhoosh.exe"
+WINEPREFIX="$(dirname "$0")/wineprefix" wine "$(dirname "$0")/mywhoosh/$(ls -1 "$(dirname "$0")/mywhoosh" | sort -V | tail -1)/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe"
 EOF
 chmod +x "$1/start_mywhoosh.sh"
 
