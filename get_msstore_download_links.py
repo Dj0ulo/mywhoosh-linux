@@ -291,13 +291,24 @@ def _bar_animation(percent):
     filled_length = int(bar_length * percent // 100)
     return f"[{'=' * filled_length}{' ' * (bar_length - filled_length)}] {percent}%"
 
-def _fetch_links_progress_callback(percent):
-    """Custom progress bar hook for get_download_links"""
-    if percent < 100:       
-        sys.stdout.write(f"\r-> Fetching download link: {_bar_animation(percent)}")
+def _download_progress_callback(block_num: int, block_size: int, total_size: int) -> None:
+    """reporthook-style progress callback for file downloads."""
+    downloaded = block_num * block_size
+    if total_size > 0:
+        percent = min(100, int(downloaded * 100 / total_size))
+        downloaded_mb = downloaded / (1024 * 1024)
+        total_mb = total_size / (1024 * 1024)
+        print(f"\r   {_bar_animation(percent)} ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end="", flush=True)
     else:
-        sys.stdout.write(f"\r-> Fetching download link: {_bar_animation(100)}\n")
-    sys.stdout.flush()
+        print(f"\r   {downloaded / (1024 * 1024):.1f} MB downloaded...", end="", flush=True)
+
+
+def _fetch_links_progress_callback(percent: int) -> None:
+    """Custom progress bar hook for get_download_links"""
+    if percent < 100:
+        print(f"\r-> Fetching download link: {_bar_animation(percent)}", end="", flush=True)
+    else:
+        print(f"\r-> Fetching download link: {_bar_animation(100)}")
 
 
 def get_download_links(
@@ -606,16 +617,18 @@ def download_packages(
                     total = int(resp.headers.get("Content-Length") or 0)
                     downloaded = 0
                     with open(part, "wb") as out:
+                        block_num = 0
+                        block_size = 65536
                         while True:
-                            chunk = resp.read(65536)
+                            chunk = resp.read(block_size)
                             if not chunk:
                                 break
                             out.write(chunk)
                             downloaded += len(chunk)
-                            if total:
-                                pct = downloaded * 100 // total
-                                print(f"\r    {pct:3d}%", end="", flush=True)
-                print(f"\r    100%  {downloaded / 1_048_576:.1f} MB")
+                            block_num += 1
+                            _download_progress_callback(block_num, block_size, total)
+                _download_progress_callback(max(1, downloaded // 65536), 65536, downloaded)
+                print()
             except Exception as exc:
                 part.unlink(missing_ok=True)
                 print(f"  Error: download failed for {file_name}: {exc}", file=sys.stderr)
