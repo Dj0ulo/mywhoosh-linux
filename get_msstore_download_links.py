@@ -302,7 +302,7 @@ def _fetch_links_progress_callback(percent):
 
 def get_download_links(
     product_id: str,
-    architecture: Optional[str] = None,
+    architecture: Optional[str] = "auto",
     locale: str = "en-US",
     os_sku_id: int = 48,
     os_version: str = "10.0.16184.1001",
@@ -501,6 +501,24 @@ def get_download_links(
         print("Error: No updates found for this product.", file=sys.stderr)
         sys.exit(1)
 
+    # Pre-filter before making FE3 requests — avoids one round-trip per excluded package
+    if architecture:
+        packages = [p for p in packages if p.architecture in (architecture, "neutral")]
+
+    if main_only and main_package_prefix:
+        packages = [p for p in packages if p.file_name.startswith(main_package_prefix)]
+        # Keep only the latest version per architecture
+        def _version_tuple(p: PackageInfo) -> tuple:
+            try:
+                return tuple(int(x) for x in p.file_name.split("_")[1].split("."))
+            except (IndexError, ValueError):
+                return (0,)
+        best: Dict[Optional[str], PackageInfo] = {}
+        for p in packages:
+            if p.architecture not in best or _version_tuple(p) > _version_tuple(best[p.architecture]):
+                best[p.architecture] = p
+        packages = list(best.values())
+
     # --- Step 3: GetExtendedUpdateInfo2 ---
     progress_callback and progress_callback(75)
     fe3_headers = {
@@ -513,9 +531,6 @@ def get_download_links(
     }
 
     for pkg in packages:
-        if architecture and pkg.architecture not in (architecture, "neutral"):
-            continue
-
         fe3_resp = _soap_post(fe3_url, fe3_headers, f"""
             <updateIDs>
                 <UpdateIdentity>
@@ -548,8 +563,6 @@ def get_download_links(
         {"FileName": p.file_name, "Architecture": p.architecture, "Url": p.url, "Digest": p.sha256}
         for p in packages
         if p.url
-        and (not architecture or p.architecture in (architecture, "neutral"))
-        and (not main_only or not main_package_prefix or p.file_name.startswith(main_package_prefix))
     ]
     progress_callback and progress_callback(100)
     return final
@@ -640,7 +653,7 @@ def main() -> None:
     parser.add_argument("product_id", help="The Product ID of the Microsoft Store app")
     parser.add_argument(
         "--architecture",
-        choices=["x86", "x64", "arm", "arm64", "neutral"],
+        choices=["x86", "x64", "arm", "arm64", "neutral", "auto"],
         help="Filter packages by architecture",
     )
     parser.add_argument(
@@ -685,7 +698,7 @@ def main() -> None:
 
     results = get_download_links(
         product_id=args.product_id,
-        architecture=args.architecture or _current_arch(),
+        architecture=_current_arch() if args.architecture == "auto" else args.architecture,
         locale=args.locale,
         os_sku_id=args.os_sku_id,
         os_version=args.os_version,
