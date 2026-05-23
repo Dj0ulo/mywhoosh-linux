@@ -520,7 +520,6 @@ def get_download_links(
         packages = list(best.values())
 
     # --- Step 3: GetExtendedUpdateInfo2 ---
-    progress_callback and progress_callback(75)
     fe3_headers = {
         "action": "GetExtendedUpdateInfo2",
         "message_id": "2cc99c2e-3b3e-4fb1-9e31-0cd30e6f43a0",
@@ -531,6 +530,7 @@ def get_download_links(
     }
 
     for pkg in packages:
+        progress_callback and progress_callback(75 + (25 * packages.index(pkg) // len(packages)))
         fe3_resp = _soap_post(fe3_url, fe3_headers, f"""
             <updateIDs>
                 <UpdateIdentity>
