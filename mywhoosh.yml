@@ -1,0 +1,55 @@
+name: MyWhoosh
+game_slug: mywhoosh-lutris
+version: Fully Automated (MSIX + Bluetooth Patch)
+slug: mywhoosh-fully-automated
+runner: wine
+
+script:
+  files:
+    # 1. Fetch your custom downloader script and your patched DLL from GitHub
+    # - downloader: https://github.com/YOUR_USERNAME/mywhoosh-linux-patch/raw/main/download_mywhoosh.py
+    - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms-store-download.py
+    # - patch_dll: https://github.com/YOUR_USERNAME/mywhoosh-linux-patch/releases/download/v1.0.0/WindowsConnectivity.dll
+    - patch_dll: http://0.0.0.0:8000/WindowsConnectivity.dll
+    # - icu_dll: https://github.com/YOUR_USERNAME/mywhoosh-linux-patch/releases/download/v1.0.0/icu.dll
+    - icu_dll: http://0.0.0.0:8000/icu.dll
+  game:
+    exe: drive_c/MyWhooshApp/MyWhoosh.exe
+    prefix: $GAMEDIR
+    arch: win64
+
+  wine:
+    dxvk: true
+    dll_overrides:
+      WindowsConnectivity: n,b
+      icu: n,b
+
+  installer:
+    # 2. Setup standard Wine environment
+    - task:
+        name: create_prefix
+        prefix: $GAMEDIR
+        arch: win64
+
+    # 3. Create the game folder structure
+    - mkdir: $GAMEDIR/drive_c/MyWhooshApp
+    - mkdir: $CACHE
+
+    # 4. Execute your python script natively on Linux to grab the fresh MSIX file
+    # Adjust python/python3 depending on standard distro execution
+    - execute:
+        file: python3
+        args: $downloader "9ndh0f2vhzx2" --download --extract $GAMEDIR/drive_c/MyWhooshApp --extract-flat
+
+    - move:
+        src: $GAMEDIR/drive_c/MyWhooshApp/MyWhoosh/Binaries/Win64/MyWhoosh.exe
+        dst: $GAMEDIR/drive_c/MyWhooshApp/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
+
+    # 6. Inject your custom WindowsConnectivity.dll patch
+    - move:
+        src: patch_dll
+        dst: $GAMEDIR/drive_c/MyWhooshApp/MyWhoosh/Content/Libraries/Win64/WindowsConnectivity.dll
+
+    # - move:
+    #     src: icu_dll
+    #     dst: $GAMEDIR/drive_c/MyWhooshApp/MyWhoosh/Content/Libraries/Win64/icu.dll
