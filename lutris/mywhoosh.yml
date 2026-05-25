@@ -1,0 +1,43 @@
+name: MyWhoosh
+game_slug: mywhoosh
+version: Microsoft Store
+description: |
+  This installer downloads the MyWhoosh MSIX package from the Microsoft Store,
+  installs it on your machine and applies necessary patches.  
+
+  IMPORTANT: To connect your smart trainer, heart rate monitor and other devices
+  use the MyWhoosh Link app since Bluetooth and ANT+ are not currently supported
+  directly from Wine. Here are the links to download the companion app:
+   - Android: https://play.google.com/store/apps/details?id=com.whoosh.companion
+   - iOS: https://apps.apple.com/be/app/mywhoosh-link/id1561724525
+
+slug: mywhoosh-ms-store
+runner: wine
+script:
+  files:
+    - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms_store_download.py
+    - patch_windows_connectivity_dll: https://raw.githubusercontent.com/Dj0ulo/mywhoosh-linux/main/patch/patch_windows_connectivity_dll.py
+  game:
+    exe: drive_c/MyWhoosh/MyWhoosh.exe
+    prefix: $GAMEDIR
+    arch: win64
+  wine:
+    dxvk: true
+  installer:
+    - task:
+        name: create_prefix
+        prefix: $GAMEDIR
+        arch: win64
+    - mkdir: $GAMEDIR/drive_c/MyWhoosh
+    - mkdir: $CACHE
+    - execute:
+        description: Downloading MyWhoosh app from Microsoft Store
+        file: python3
+        args: $downloader 9ndh0f2vhzx2 --download $CACHE --extract $GAMEDIR/drive_c/MyWhoosh --extract-flat
+    - move:
+        src: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh.exe
+        dst: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
+    - execute:
+        description: Patching WindowsConnectivity.dll
+        file: python3
+        args: $patch_windows_connectivity_dll $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Content/Libraries/Win64/WindowsConnectivity.dll
