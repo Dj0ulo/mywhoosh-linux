@@ -297,7 +297,14 @@ def _download_progress_callback(block_num: int, block_size: int, total_size: int
         percent = min(100, int(downloaded * 100 / total_size))
         downloaded_mb = downloaded / (1024 * 1024)
         total_mb = total_size / (1024 * 1024)
-        print(f"\r   {_bar_animation(percent)} ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end="", flush=True)
+
+        if not hasattr(_download_progress_callback, "last_printed"):
+            _download_progress_callback.last_printed = -1
+
+        if sys.stdout.isatty() or (percent % 10 == 0 and percent != _download_progress_callback.last_printed):
+            print(f"\r   {_bar_animation(percent)} ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end="", flush=True)
+            _download_progress_callback.last_printed = percent
+
     else:
         print(f"\r   {downloaded / (1024 * 1024):.1f} MB downloaded...", end="", flush=True)
 
