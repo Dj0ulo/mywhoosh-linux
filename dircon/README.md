@@ -14,10 +14,14 @@ This directory contains the probes used to find out how far it actually gets.
 
 ## Result
 
-Blocker 1 is **fixed** — see `../winemono/`, which patches wine-mono's
-`ComAwareEventInfo` and installs the result into a prefix. With it in place the
-whole `WD_*` API comes up and runs; the path now stops only at blocker 2, with
-nothing discovered because mDNSResponder under Wine never receives a packet.
+Both blockers are dealt with, and the whole path runs:
+
+- Blocker 1 is **fixed** — `../winemono/` patches wine-mono's
+  `ComAwareEventInfo` and installs the result into a prefix.
+- Blocker 2 is **bypassed** — `../fakesensor/` replaces Bonjour's two coclasses
+  with an in-proc COM server of our own, so nothing depends on mDNSResponder
+  hearing a packet. With both in place the game's own `WD_GetPower()` and
+  `WD_GetHeart()` return live values from a sensor served over loopback TCP.
 
 | Step | Status |
 |---|---|
@@ -30,6 +34,7 @@ nothing discovered because mDNSResponder under Wine never receives a packet.
 | `ComAwareEventInfo.AddEventHandler` — how the game wires its sinks | **fixed** by `../winemono/` |
 | `WD_InitWahooDirconManager()` … `WD_StopScanningAll()` | works |
 | **mDNSResponder actually discovering anything** | **never joins the multicast group** |
+| Discovery, pairing and live data with Bonjour replaced | works — see `../fakesensor/` |
 
 ### Blocker 1 — `ComAwareEventInfo` is a throw-only stub in wine-mono (fixed)
 
@@ -103,7 +108,7 @@ earlier.
 Because of this, the "publish from Linux with avahi, discover in the game" story
 is unproven end to end.
 
-### The conclusion this points at
+### The conclusion this points at, and what came of it
 
 Fixing Apple's 2011 mDNSResponder under Wine is the wrong thing to chase. Since
 Mono's COM interop is demonstrably healthy here — activation, RCW calls,
@@ -117,16 +122,20 @@ DNSSDEventManager  {BEEB932A-8D4A-4619-AEFE-A836F988B221}
 _IDNSSDEvents      {21AE8D7F-D5FE-45CF-B632-CFA2C2C6B498}  (dispinterface)
 ```
 
-It would answer `Browse`/`Resolve` straight from the bridge daemon over a
-loopback socket — no mDNS on the wire at all, no Apple code, no port conflict,
-and no second responder fighting avahi. `ComAwareEventInfo` had to be solved for
-either route, and now is.
+It answers `Browse`/`Resolve` from its own state over a loopback socket — no mDNS
+on the wire at all, no Apple code, no port conflict, and no second responder
+fighting avahi. `ComAwareEventInfo` had to be solved for either route, and now
+is. **`../fakesensor/` is that server**, and it drives the game's API end to end.
 
-One thing that server has to settle: whether Mono's CCW delivers
-`IDispatch::Invoke` to the sink at all. Bonjour never raised an event here — it
-receives no packets — so the sink has been Advised but never called. If Mono's
-CCW turns out not to implement `Invoke`, the server should call the sink
-early-bound through the interface vtable instead.
+Building it settled the open question, in the direction that makes this the only
+route rather than merely the cleaner one: Mono's CCW does **not** dispatch
+`IDispatch::Invoke` to the sink — it rejects the type library's dispid with
+`DISP_E_MEMBERNOTFOUND` and the id from its own `GetIDsOfNames` with
+`E_INVALIDARG` — while the same call through the interface vtable arrives
+normally. Real Bonjour calls `Invoke`, so it could never have delivered these
+events under wine-mono even with mDNS working.
+`../winemono/SinkInvokeProbe.cs` is the measurement; `../fakesensor/README.md`
+has the details and the other three things that had to be measured.
 
 ## Probes
 
@@ -141,6 +150,11 @@ step-by-step trace, so a failure names the exact missing piece.
 | `DnssdProbe.cs` | Talks to `dnssd.dll`'s C API directly — separates "is the daemon alive" from "does COM eventing work" |
 | `reuseaddr_shim.c` | LD_PRELOAD shim letting mDNSResponder share port 5353 with avahi |
 
+`TestDircon` goes all the way through when `../fakesensor/` is installed: it
+scans as a power source (the only scan type whose results are reported), connects
+the first device it finds in both the power and heart-rate slots, and prints a
+second-by-second reading.
+
 `TestDircon` and `BonjourProbe` run as `[STAThread]` and pump a message loop:
 Bonjour's objects are apartment-threaded and deliver callbacks through the
 thread's queue, and from an MTA thread the browse crashes in the marshaller
@@ -150,7 +164,7 @@ rather than merely failing. The game, being Unreal, pumps anyway.
 
 ```sh
 ./build.sh                 # builds TestDircon against the installed game DLL
-./run.sh 20                # runs it in ~/Games/mywhoosh, scanning for 20s
+./run.sh 20 10             # 20s scan, then 10s of readings
 
 # or against another prefix / another install:
 GAME_LIBS=/path/to/Content/Libraries/Win64 WINEPREFIX=/path/to/prefix ./run.sh
@@ -188,7 +202,12 @@ Note the wrapper's own `/quiet` install fails with MSI 1603 — it runs
   four lines. Anything written against these types has to stay off that path.
 - `GetNetworkState()` checks for a service named exactly `"Bonjour Service"` with
   status `Running`. That gate alone is trivially satisfiable in Wine without
-  Apple's code — but opening it just moves the failure to `WFTNP_Init`.
+  Apple's code — but opening it just moves the failure to `WFTNP_Init`. The test
+  prefix still uses Apple's service for it; only the COM classes are replaced.
+- `DirconSensor.TryToReconnect` pings the sensor's host, and raw sockets are
+  denied under Wine (`IsTrainerAvailable - exception Access denied.`, in a tight
+  loop). Nothing reconnects after a drop until that is dealt with outside the
+  game.
 - The `.md` API reference in `wine-ble/test-ble/WindowsConnectivity.md` has
   several signatures wrong (`WD_RegisterDelegates` takes 5 delegates, not 6;
   `ConnectDelegate` and `ConnectivityDataInput` differ). Trust reflection over

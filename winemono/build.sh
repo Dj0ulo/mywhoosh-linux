@@ -31,6 +31,8 @@ if [ -f "$GAME_LIBS/WindowsConnectivity.dll" ]; then
     mcs -platform:x64 -out:build/SinkEmitProbe.exe -r:build/MyWhoosh.ComEventShim.dll \
         -r:build/WindowsConnectivity.dll SinkEmitProbe.cs
     mcs -platform:x64 -out:build/ReflProbe.exe -r:build/WindowsConnectivity.dll ReflProbe.cs
+    mcs -platform:x64 -out:build/SinkInvokeProbe.exe -r:build/MyWhoosh.ComEventShim.dll \
+        -r:build/WindowsConnectivity.dll SinkInvokeProbe.cs
 else
     echo "note: WindowsConnectivity.dll not found, skipping the interop probes (set GAME_LIBS=)"
 fi

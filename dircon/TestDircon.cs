@@ -9,7 +9,10 @@
 // it directly, without launching the game, and prints everything the manager
 // logs so we can see how far it gets.
 //
-// Build: ./build.sh      Run: ./run.sh
+// Build: ./build.sh      Run: ./run.sh [scan_seconds] [read_seconds]
+//
+// With ../fakesensor/ installed in the prefix this runs the whole loop:
+// discovery, connection, and live power/heart-rate readings.
 
 using System;
 using System.Runtime.InteropServices;
@@ -58,8 +61,10 @@ class TestDircon
     static void Main(string[] args)
     {
         int scanSeconds = args.Length > 0 ? int.Parse(args[0]) : 20;
+        int readSeconds = args.Length > 1 ? int.Parse(args[1]) : 10;
 
-        Say("HARNESS", "MyWhoosh Dircon probe -- scanning for " + scanSeconds + "s");
+        Say("HARNESS", "MyWhoosh Dircon probe -- scanning for " + scanSeconds + "s, "
+                     + "then reading for " + readSeconds + "s");
 
         // --- 1. Bring the manager up first: every other WD_ call dereferences it --
         Try("WD_InitWahooDirconManager", () => MyWhoosh.WD_InitWahooDirconManager());
@@ -112,9 +117,14 @@ class TestDircon
         Try("WD_GetNetworkState", () => Say("PROBE", "NetworkState = " + MyWhoosh.WD_GetNetworkState()));
 
         // --- 5. Browse for _wahoo-fitness-tnp._tcp ----------------------------
+        // Scan *as a power source*: GetAllScannedDevices only reports the Dircon
+        // scan list when scanDeviceType is E_PowerSource or E_SecondaryPower, and
+        // only WD_StartScanning sets it -- WD_StartScanningAll leaves it None and
+        // the list comes back empty however many services were resolved.
         Try("WD_OnPairWidgetOpen", () => MyWhoosh.WD_OnPairWidgetOpen());
-        Try("WD_StartScanningAll", () => MyWhoosh.WD_StartScanningAll());
+        Try("WD_StartScanning", () => MyWhoosh.WD_StartScanning(EDeviceTypeEnum.E_PowerSource));
 
+        DeviceInformationStruct? target = null;
         for (int i = 1; i <= scanSeconds; i++)
         {
             Pump(1000);
@@ -125,10 +135,43 @@ class TestDircon
                 Say("SCAN", "t+" + i + "s: " + n + " device(s)");
                 if (found != null)
                     foreach (var d in found) Say("SCAN", "   " + Describe(d));
+                if (found != null && found.Length > 0 && target == null) target = found[0];
             });
+            if (target != null) break;
         }
 
-        Try("WD_StopScanningAll", () => MyWhoosh.WD_StopScanningAll());
+        // --- 6. Connect to whatever turned up, then read it --------------------
+        if (target == null)
+        {
+            Say("HARNESS", "nothing discovered -- stopping here");
+        }
+        else
+        {
+            DeviceInformationStruct d = target.Value;
+            Say("HARNESS", "connecting to " + Describe(d));
+            Try("WD_ConnectToDevice(power)", () => MyWhoosh.WD_ConnectToDevice(ref d));
+
+            // Slots are independent: WD_GetHeart reads the sensor paired as
+            // E_HeartRate, so the same device has to be claimed there too or the
+            // heart rate it is already reporting stays invisible.
+            DeviceInformationStruct hr = d;
+            hr.deviceType = EDeviceTypeEnum.E_HeartRate;
+            Try("WD_ConnectToDevice(heart)", () => MyWhoosh.WD_ConnectToDevice(ref hr));
+
+            for (int i = 1; i <= readSeconds; i++)
+            {
+                Pump(1000);
+                Try("WD_Get*", () => Say("READ", string.Format(
+                    "t+{0}s power={1}W cadence={2} speed={3} hr={4} connected={5}",
+                    i, MyWhoosh.WD_GetPower(), MyWhoosh.WD_GetCadence(),
+                    MyWhoosh.WD_GetSpeed(), MyWhoosh.WD_GetHeart(),
+                    MyWhoosh.WD_IsDeviceConnected(EDeviceTypeEnum.E_PowerSource))));
+            }
+
+            Try("WD_DisconnectAll", () => MyWhoosh.WD_DisconnectAll());
+        }
+
+        Try("WD_StopScanning", () => MyWhoosh.WD_StopScanning());
         Try("WD_OnPairWidgetClose", () => MyWhoosh.WD_OnPairWidgetClose());
         Say("HARNESS", "done");
         Environment.Exit(0);   // manager keeps background threads alive

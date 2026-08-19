@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the Dircon probe inside the MyWhoosh Wine prefix.
 #
-#   ./run.sh [scan_seconds]
+#   ./run.sh [scan_seconds] [read_seconds]
 #
 # Env overrides: WINEPREFIX, WINE, GAME_LIBS
 set -e
@@ -15,4 +15,4 @@ WINE="${WINE:-$HOME/.local/share/lutris/runners/wine/GE-Proton10-4/bin/wine}"
 
 export WINEDEBUG="${WINEDEBUG:-fixme-all,err-all}"
 cd build
-exec "$WINE" TestDircon.exe "${1:-20}"
+exec "$WINE" TestDircon.exe "${1:-20}" "${2:-10}"
