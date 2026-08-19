@@ -16,11 +16,22 @@ using Bonjour;
 
 class BonjourProbe
 {
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+
+    [DllImport("user32.dll")] static extern bool PeekMessage(out MSG m, IntPtr hWnd, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref MSG m);
+
     const string SERVICE_TYPE = "_wahoo-fitness-tnp._tcp.";
 
     static readonly Guid CLSID_DNSSDService      = new Guid("24CD4DE9-FF84-4701-9DC1-9B69E0D1090A");
     static readonly Guid CLSID_DNSSDEventManager = new Guid("BEEB932A-8D4A-4619-AEFE-A836F988B221");
 
+    // Bonjour's objects are apartment-threaded and deliver callbacks through the
+    // thread's message queue, so the probe has to be an STA that pumps -- which
+    // is what the game, being Unreal, does anyway.
+    [STAThread]
     static void Main(string[] args)
     {
         int seconds = args.Length > 0 ? int.Parse(args[0]) : 20;
@@ -46,7 +57,18 @@ class BonjourProbe
 
         Console.WriteLine("\nbrowsing for " + seconds + "s -- publish a service on the host with:");
         Console.WriteLine("  avahi-publish -s FakeTrainer _wahoo-fitness-tnp._tcp 36866\n");
-        for (int i = 0; i < seconds; i++) { Thread.Sleep(1000); Console.Out.Flush(); }
+        var deadline = DateTime.Now.AddSeconds(seconds);
+        MSG msg;
+        while (DateTime.Now < deadline)
+        {
+            while (PeekMessage(out msg, IntPtr.Zero, 0, 0, 1 /*PM_REMOVE*/))
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+            Thread.Sleep(20);
+            Console.Out.Flush();
+        }
 
         Console.WriteLine("\nprobe complete (" + found + " service(s) found)");
         Environment.Exit(0);

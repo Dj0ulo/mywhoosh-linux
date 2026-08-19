@@ -14,8 +14,10 @@ This directory contains the probes used to find out how far it actually gets.
 
 ## Result
 
-The Dircon path is **not** currently usable, blocked on two independent
-problems. Everything else on the path works.
+Blocker 1 is **fixed** — see `../winemono/`, which patches wine-mono's
+`ComAwareEventInfo` and installs the result into a prefix. With it in place the
+whole `WD_*` API comes up and runs; the path now stops only at blocker 2, with
+nothing discovered because mDNSResponder under Wine never receives a packet.
 
 | Step | Status |
 |---|---|
@@ -25,10 +27,11 @@ problems. Everything else on the path works.
 | `CoCreateInstance` of `DNSSDService` / `DNSSDEventManager` | works |
 | `IConnectionPointContainer::FindConnectionPoint` + `Advise` with a managed sink | works |
 | `IDNSSDService::Browse()` from an STA thread | works |
-| **`ComAwareEventInfo.AddEventHandler`** — how the game wires its sinks | **wine-mono stub, throws** |
+| `ComAwareEventInfo.AddEventHandler` — how the game wires its sinks | **fixed** by `../winemono/` |
+| `WD_InitWahooDirconManager()` … `WD_StopScanningAll()` | works |
 | **mDNSResponder actually discovering anything** | **never joins the multicast group** |
 
-### Blocker 1 — `ComAwareEventInfo` is a throw-only stub in wine-mono
+### Blocker 1 — `ComAwareEventInfo` is a throw-only stub in wine-mono (fixed)
 
 `WahooProgram..ctor` calls `GetNetworkState()`, and if a service named exactly
 `"Bonjour Service"` is `Running` it proceeds to `WFTNP_Init()`, which wires its
@@ -56,10 +59,27 @@ Where the fix can live:
   resolves `System.Core` from its own GAC
   (`.../wine-mono-10.0.0/lib/mono/gac/System.Core/4.0.0.0__b77a5c561934e089/`),
   and neither an app-directory copy nor `MONO_PATH` overrides it (both tested).
-  It would mean shipping a patched wine-mono, or installing one into the prefix.
+  It means shipping a patched wine-mono, or installing one into the prefix.
+  **This is what `../winemono/` does** — `mscoree` probes
+  `<prefix>/drive_c/windows/mono/mono-2.0` before the runner's shared tree, so
+  the patch is per-prefix and the runner is never touched.
 - **IL-rewriting `WFTNP_Init`** to call a helper assembly we ship instead. Keeps
   everything inside the game directory, but needs real metadata editing (new
   assembly/type/member refs) rather than the byte patch `patch/` does today.
+  Still open, and still the option to take if a patched runtime turns out to be
+  awkward to distribute.
+
+With the patched runtime installed, `TestDircon` gets through the entire API:
+
+```
+[  0.748] CALL   WD_InitWahooDirconManager -> ok
+[  0.752] PROBE  DirconServiceAvailability = True
+[  0.752] CALL   WD_RegisterDelegates -> ok
+[  0.760] CALL   WD_OnPairWidgetOpen -> ok
+[  0.777] CALL   WD_StartScanningAll -> ok
+[ 10.903] SCAN   t+10s: 0 device(s)          <- blocker 2
+[ 10.904] CALL   WD_StopScanningAll -> ok
+```
 
 ### Blocker 2 — mDNSResponder discovers nothing under Wine
 
@@ -99,8 +119,14 @@ _IDNSSDEvents      {21AE8D7F-D5FE-45CF-B632-CFA2C2C6B498}  (dispinterface)
 
 It would answer `Browse`/`Resolve` straight from the bridge daemon over a
 loopback socket — no mDNS on the wire at all, no Apple code, no port conflict,
-and no second responder fighting avahi. `ComAwareEventInfo` still has to be
-solved either way.
+and no second responder fighting avahi. `ComAwareEventInfo` had to be solved for
+either route, and now is.
+
+One thing that server has to settle: whether Mono's CCW delivers
+`IDispatch::Invoke` to the sink at all. Bonjour never raised an event here — it
+receives no packets — so the sink has been Advised but never called. If Mono's
+CCW turns out not to implement `Invoke`, the server should call the sink
+early-bound through the interface vtable instead.
 
 ## Probes
 
@@ -114,6 +140,11 @@ step-by-step trace, so a failure names the exact missing piece.
 | `SinkProbe.cs` | Bypasses `ComAwareEventInfo` and wires the sink through `IConnectionPoint::Advise` by hand |
 | `DnssdProbe.cs` | Talks to `dnssd.dll`'s C API directly — separates "is the daemon alive" from "does COM eventing work" |
 | `reuseaddr_shim.c` | LD_PRELOAD shim letting mDNSResponder share port 5353 with avahi |
+
+`TestDircon` and `BonjourProbe` run as `[STAThread]` and pump a message loop:
+Bonjour's objects are apartment-threaded and deliver callbacks through the
+thread's queue, and from an MTA thread the browse crashes in the marshaller
+rather than merely failing. The game, being Unreal, pumps anyway.
 
 ### Running them
 
@@ -149,8 +180,12 @@ Note the wrapper's own `/quiet` install fails with MSI 1603 — it runs
 
 ## Notes
 
-- Everything here was run in a throwaway prefix. `~/Games/mywhoosh` was only
-  read from; its registry differs from the pre-test backup by timestamps alone.
+- Everything here was run in throwaway prefixes (latest: `~/Games/dircon-test`).
+  `~/Games/mywhoosh` was only read from; its registry differs from the pre-test
+  backup by timestamps alone.
+- Reflection over the embedded interop *source* dispinterface aborts wine-mono
+  outright (`method->slot < nslots`); `../winemono/ReflProbe.cs` reproduces it in
+  four lines. Anything written against these types has to stay off that path.
 - `GetNetworkState()` checks for a service named exactly `"Bonjour Service"` with
   status `Running`. That gate alone is trivially satisfiable in Wine without
   Apple's code — but opening it just moves the failure to `WFTNP_Init`.
