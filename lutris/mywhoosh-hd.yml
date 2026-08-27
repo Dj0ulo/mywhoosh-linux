@@ -40,4 +40,4 @@ script:
     - execute:
         description: Patching WindowsConnectivity.dll
         file: python3
-        args: $patch_windows_connectivity_dll $GAMEDIR/drive_c/MyWhooshHD/MyWhoosh/Content/Libraries/Win64/WindowsConnectivity.dll
+        args: $patch_windows_connectivity_dll $GAMEDIR/drive_c/MyWhooshHD/MyWhoosh/Binaries/Win64/WindowsConnectivity.dll
