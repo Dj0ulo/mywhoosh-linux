@@ -29,8 +29,15 @@ cd mywhoosh-linux
 
 Import the provided Lutris installer script:
 
+Version with low quality textures
+
 ```bash
 lutris -i lutris/mywhoosh.yml
+```
+Version with High quality textures
+
+```bash
+lutris -i lutris/mywhoosh-hd.yml
 ```
 
 This will:
