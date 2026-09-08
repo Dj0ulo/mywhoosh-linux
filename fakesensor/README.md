@@ -35,6 +35,7 @@ GATT services over a loopback TCP socket in Wahoo's Direct Connect protocol.
 | `build.sh` | mingw-w64 build of the DLL, host build of the shim |
 | `install.sh` | Points the two CLSIDs at the DLL inside one prefix (`--restore` undoes it) |
 | `run.sh` | Runs `../dircon/TestDircon` against it |
+| `blebridge.py` | The same socket, backed by a **real** BLE trainer through BlueZ |
 
 ## Usage
 
@@ -54,6 +55,60 @@ Knobs, all read from the environment by the DLL: `FAKESENSOR_NAME`,
 The sensor advertises Cycling Power (`0x1818` / `0x2a63`) and Heart Rate
 (`0x180d` / `0x2a37`), both notify-only, and pushes a measurement on each once a
 second.
+
+## Real hardware
+
+`blebridge.py` replaces the hard-coded half. It connects to an actual BLE
+fitness device through BlueZ -- on the Linux side, where Bluetooth works, rather
+than through Wine's WinRT stack, which does not (`../README.md`, blocker 1) --
+and proxies its GATT tree onto the same Dircon socket. Dircon maps onto GATT
+almost one to one (1 lists services, 2 lists characteristics, 3 reads, 4 writes,
+5 subscribes, 6 is a notification), so this is a proxy rather than a translation,
+and the game sees the services the trainer really has.
+
+Measured against a Tacx Flux, with `fakebonjour` advertising it instead of a
+made-up sensor:
+
+```
+SCAN   t+5s: 1 device(s)
+SCAN      "Tacx Flux 06189" uuid=6189:x:...:x:Tacx-Flux-06189.local.:x:36866
+CONN   E_PowerSource E_Success "Tacx Flux 06189" ...
+READ   t+4s  power=128W cadence=82 speed=-1 hr=0 connected=True
+READ   t+22s power=142W cadence=76 speed=-1 hr=0 connected=True
+```
+
+Real watts and real cadence, out of the game's own `WD_GetPower()` and
+`WD_GetCadence()`. Cadence works here where the fake sensor could never make it
+work, because the trainer does send crank data.
+
+```sh
+./blebridge.py --list                       # scan, print candidates
+./blebridge.py --mac FA:55:E5:BE:21:A5 &    # or no --mac: first fitness device seen
+FAKESENSOR_EXTERNAL=1 FAKESENSOR_NAME="Tacx Flux 06189" FAKESENSOR_SERIAL=6189 \
+    ./run.sh 10 45
+```
+
+`FAKESENSOR_EXTERNAL=1` stops the DLL binding the port itself, so it only
+advertises the one the bridge already serves. `FAKESENSOR_NAME` should be the
+device's real name -- the host name the game resolves is derived from it -- and
+`FAKESENSOR_SERIAL` has to stay digits, since the game parses it as a `UInt64`.
+
+Two things this proves beyond the readings:
+
+**The game drives the trainer, not just reads it.** It found the FTMS control
+point and wrote to it, and those writes reached the hardware: `00` (request
+control), `01` (reset), then `11 00000000 0000` -- opcode 0x11, set indoor-bike
+simulation parameters, grade zero. So resistance control has a path, on real
+hardware, through this bridge.
+
+**The game prefers FTMS over Cycling Power.** Offered both `0x1818` and
+`0x1826`, it subscribed to `0x2ad2`/`0x2ada` and ignored `0x2a63`. Its power and
+cadence come from Indoor Bike Data.
+
+`speed` stays `-1`: the trainer has no Cycling Speed and Cadence service
+(`0x1816`), and although FTMS Indoor Bike Data carries a speed field, the game
+does not take it from there. `hr` is `0` because nothing here is a heart-rate
+strap -- pair one as `E_HeartRate` and it would be a second device, not this one.
 
 ## What had to be measured
 
@@ -133,5 +188,8 @@ same sensor is also connected as `E_HeartRate`.
   happens. The test prefix has Apple's, installed from the game's own SDK
   bundle — only its two COM classes are taken over. Satisfying that gate without
   Apple's code is easy but not done here.
+- `blebridge.py` serves one client at a time and needs the device already
+  paired-or-connectable by BlueZ; it does not pair for you. If the trainer is
+  already connected to a phone or a head unit, BlueZ will not get it.
 - One sensor, one client connection at a time, and the objects are only safe on
   the game's STA thread (registered `ThreadingModel=Apartment`, like Bonjour).

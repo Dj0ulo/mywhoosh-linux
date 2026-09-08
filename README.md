@@ -54,6 +54,17 @@ Bluetooth and ANT+ are **not currently supported** directly from Wine. To connec
 
 The companion app bridges your fitness devices to the desktop client over your local network.
 
+### Connecting a trainer without the phone (experimental)
+
+`fakesensor/blebridge.py` does the companion app's job from Linux: it connects
+to a Bluetooth LE trainer through BlueZ and serves it to the game over Wahoo
+Direct Connect, so real power and cadence arrive without a phone in the loop.
+Measured working on a Tacx Flux, including resistance control.
+
+It is not a drop-in yet -- it needs a patched wine-mono
+(`winemono/`) and takes over Bonjour's two COM classes in the prefix
+(`fakesensor/`). See `fakesensor/README.md`.
+
 ---
 
 ## How it works

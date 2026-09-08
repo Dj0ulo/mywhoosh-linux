@@ -37,6 +37,8 @@
  *   FAKESENSOR_POWER   watts reported on 0x2a63      (default 150)
  *   FAKESENSOR_BPM     heart rate reported on 0x2a37 (default 75)
  *   FAKESENSOR_SINKBASE  first event vtable slot     (default 7)
+ *   FAKESENSOR_EXTERNAL  1 = do not serve Dircon ourselves; something else
+ *                        already listens on FAKESENSOR_PORT (blebridge.py)
  *   FAKESENSOR_LOG     log file; otherwise stderr
  */
 
@@ -60,6 +62,7 @@ static int  cfg_port       = 36866;
 static int  cfg_power      = 150;
 static int  cfg_bpm        = 75;
 static int  cfg_sink_base  = 7;
+static int  cfg_external   = 0;
 
 static FILE *logfp;
 static CRITICAL_SECTION loglock;
@@ -106,6 +109,7 @@ static void load_config(void)
     env_int("FAKESENSOR_POWER", &cfg_power);
     env_int("FAKESENSOR_BPM", &cfg_bpm);
     env_int("FAKESENSOR_SINKBASE", &cfg_sink_base);
+    env_int("FAKESENSOR_EXTERNAL", &cfg_external);
 }
 
 /* -------------------------------------------------------------------- GUIDs */
@@ -863,6 +867,10 @@ static DWORD WINAPI dircon_thread(void *unused)
 
 static void dircon_start(void)
 {
+    if (cfg_external) {
+        logmsg("dircon: FAKESENSOR_EXTERNAL, expecting a server on port %d already", cfg_port);
+        return;
+    }
     if (InterlockedCompareExchange(&dircon_started, 1, 0) != 0) return;
     CloseHandle(CreateThread(NULL, 0, dircon_thread, NULL, 0, NULL));
 }
