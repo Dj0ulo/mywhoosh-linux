@@ -110,6 +110,26 @@ cadence come from Indoor Bike Data.
 does not take it from there. `hr` is `0` because nothing here is a heart-rate
 strap -- pair one as `E_HeartRate` and it would be a second device, not this one.
 
+## It also starts the export shim
+
+`fakebonjour.c` does one thing that has nothing to do with Bonjour: on its first
+`CreateInstance` it calls `shim_kick()`, which loads `../exportshim/`'s
+`MyWhooshShim.dll` through mono's embedding API and invokes
+`MyWhoosh.ExportShim::Install`.
+
+That shim replaces the four `Get*DevicesList` exports, which wine-mono refuses
+to marshal and which the game's UI polls constantly — without it the game dies
+with `MarshalDirectiveException` seconds after the objects below are created.
+It has to run inside the game process, after `WindowsConnectivity.dll` is loaded
+and before the first poll, and this DLL is the only thing of ours that is
+reliably there at that moment: the game's own connectivity init is what creates
+the Bonjour objects, which is what loads us. `MYWHOOSH_SHIM_DLL` overrides the
+path it looks in, or disables the shim when set empty.
+
+The coupling is worth knowing about: the shim arrives with the Bonjour path, so
+anything that stops these coclasses being created also leaves the exports
+unhooked. `../exportshim/README.md` covers what to do if that ever matters.
+
 ## What had to be measured
 
 Four things about this path are not what you would guess, and each was measured

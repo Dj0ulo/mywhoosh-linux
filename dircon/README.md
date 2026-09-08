@@ -14,9 +14,10 @@ This directory contains the probes used to find out how far it actually gets.
 
 ## Result
 
-Both original blockers are dealt with and the whole path runs — but on
-MyWhoosh 6.1.2 a third one appeared, and it is now the one that matters: the
-game never calls this code at all. See *Blocker 3* below.
+**The whole path runs from the game itself.** On MyWhoosh 6.1.2, with all four
+blockers dealt with, the game discovers a Dircon sensor, resolves it, connects
+to it and subscribes to power and heart rate — on its own threads, with no probe
+and no GUI interaction involved.
 
 - Blocker 1 is **fixed** — `../winemono/` patches wine-mono's
   `ComAwareEventInfo` and installs the result into a prefix.
@@ -24,9 +25,14 @@ game never calls this code at all. See *Blocker 3* below.
   with an in-proc COM server of our own, so nothing depends on mDNSResponder
   hearing a packet. With both in place the game's own `WD_GetPower()` and
   `WD_GetHeart()` return live values from a sensor served over loopback TCP.
-- Blocker 3 is **open** — the two bytes that stop 6.1.2 crashing at launch also
-  stop it ever loading `WindowsConnectivity.dll`, so none of the above is
-  reached from the game itself.
+- Blocker 3 is **fixed** — the patch that stopped 6.1.2 crashing at launch was
+  also what stopped it ever loading `WindowsConnectivity.dll`, because the game
+  hashes that file. `../winmd/` satisfies the missing assembly reference from
+  outside the game tree instead, leaving every game file byte-identical.
+- Blocker 4 is **fixed** — wine-mono cannot marshal the byref array the four
+  device-list exports take, and the refusal is compiled into the wrapper as a
+  throw. `../exportshim/` serves those four exports itself, redirecting the
+  vtable-fixup slots they jump through in memory.
 
 | Step | Status |
 |---|---|
@@ -41,7 +47,9 @@ game never calls this code at all. See *Blocker 3* below.
 | **mDNSResponder actually discovering anything** | **never joins the multicast group** |
 | Discovery, pairing and live data with Bonjour replaced | works — see `../fakesensor/` |
 | The game's own native `LoadLibrary` + `GetProcAddress` call path | works |
-| **The game actually calling any of it on 6.1.2** | **blocked — see Blocker 3** |
+| The game loading the DLL at all on 6.1.2 | **fixed** by `../winmd/` |
+| The four `Get*DevicesList` exports the UI polls | **fixed** by `../exportshim/` |
+| **The game discovering, connecting and reading a sensor by itself** | **works** |
 
 ### Blocker 1 — `ComAwareEventInfo` is a throw-only stub in wine-mono (fixed)
 
@@ -287,7 +295,7 @@ no exception anywhere in the trace, and the game keeps running — measured over
 100 s, `svcctl_EnumServicesStatusExW` recurring, which is `GetBonjourService()`
 inside the Dircon manager. **Blocker 3 is closed: the game asks.**
 
-## Blocker 4 — byref array marshalling (wine-mono)
+## Blocker 4 — byref array marshalling (wine-mono, fixed)
 
 On the full stack — patched wine-mono plus `../fakesensor` — the game's own init
 goes all the way into our Bonjour replacement, in the game process:
@@ -298,7 +306,7 @@ goes all the way into our Bonjour replacement, in the game process:
 [fakebonjour] created DNSSDService -> 0x00000000
 ```
 
-Twice over, one pair per manager. Then:
+Twice over, one pair per manager. Then, about nine seconds later, unprompted:
 
 ```
 [ERROR] FATAL UNHANDLED EXCEPTION:
@@ -306,29 +314,80 @@ System.Runtime.InteropServices.MarshalDirectiveException:
   Byref array marshalling to managed code is not implemented.
 ```
 
-Four exports have a byref-array parameter, and they are exactly the ones the
+Four exports take a byref-array parameter, and they are exactly the ones the
 game polls for its device lists:
 
 ```
-BT_GetScannedDevicesList    int (ref DeviceInformationStruct[])
-BT_GetConnectedDevicesList  int (ref DeviceInformationStruct[])
-WD_GetScannedDevicesList    int (ref DeviceInformationStruct[])
-WD_GetConnectedDevicesList  int (ref DeviceInformationStruct[])
+BT_GetScannedDevicesList    int (out DeviceInformationStruct[])
+BT_GetConnectedDevicesList  int (out DeviceInformationStruct[])
+WD_GetScannedDevicesList    int (out DeviceInformationStruct[])
+WD_GetConnectedDevicesList  int (out DeviceInformationStruct[])
 ```
 
-Mono raises this while *building* the native-to-managed wrapper, so the first
-call to any of the four takes the process down. This never showed up before
-because `TestDircon` and the probes call the managed methods directly; only the
-game goes through the reverse-P/Invoke thunk.
+mono compiles the refusal *into* the native-to-managed wrapper as a throw, so
+the wrapper builds and the first call to any of the four takes the process down
+from a frame where nothing can catch it. This never showed up before because
+`TestDircon` and the probes call the managed methods directly; only the game
+goes through the reverse-P/Invoke thunk.
 
-It is not fixed by a newer runtime: both wine-mono 10.0.0 and 11.1.0 carry the
-error string in `libmono-2.0-x86_64.dll`. Unlike `ComAwareEventInfo`, this one
-is in the native marshaller, not in a managed BCL assembly, so the Cecil pass in
-`../winemono/` cannot reach it.
+Nothing above the runtime can reach it. The error string is in
+`mono-2.0/bin/libmono-2.0-x86_64.dll` and in no managed assembly in the prefix,
+so unlike `ComAwareEventInfo` the Cecil pass in `../winemono/` has nothing to
+rewrite; and both wine-mono 10.0.0 and 11.1.0 carry it, so a newer runtime is
+not the fix. Removing the check would not be enough either — the same function
+then demands a `[MarshalAs]` and a `SizeConst`/`SizeParamIndex` that the game's
+metadata does not have, so the out-direction would have to be implemented from
+scratch inside `libmono`.
 
-### Reproducing this outside Lutris
+### The fix: replace the four exports, not the runtime
 
-Lutris supplies environment the game needs; a bare `wine` invocation fails with
+The exports are reached through pointers we can rewrite. Each is a 12-byte stub
+`mov rax,[slot]; jmp rax`, and every slot belongs to the CLI header's
+VTableFixups array in `.sdata`, which `mscoree` fills with mono's thunks at load.
+The game caches the export addresses from `GetProcAddress`, but those are the
+stubs, so it re-reads the slot on every call: writing a slot redirects calls that
+were looked up long before, needs nothing but a store to already-writable memory
+in our own process, and touches no file — which keeps the game's hash check on
+`WindowsConnectivity.dll` happy.
+
+`../exportshim/` is that replacement: managed code, so the shape mono will not
+marshal is not marshalled at all on our side. It calls the managed method
+directly, then hands the array out the way the CLR does on Windows — a fresh
+`CoTaskMemAlloc` block, its address stored through the pointer, the count
+returned. `../fakesensor/fakebonjour.c` loads and starts it through mono's
+embedding API, being already in the game process at the right moment.
+
+**Blocker 4 is closed.** Same prefix, same launch, no GUI interaction, the
+game's own threads throughout:
+
+```
+[exportshim]  hooked 4/4 exports
+[fakebonjour] Browse(flags=0, ifIndex=0, "_wahoo-fitness-tnp._tcp.") on the main
+[fakebonjour] ServiceFound("FakeTrainer")                      -> 0x00000000
+[fakebonjour] ServiceResolved(… at FakeTrainer.local.:36866)   -> 0x00000000
+[exportshim]  WD_GetScannedDevicesList   -> 1 device(s)
+[fakebonjour] dircon: client connected
+[fakebonjour] dircon: notifications power=1 hr=1
+[exportshim]  WD_GetConnectedDevicesList -> 1 device(s)            (every 500 ms)
+```
+
+The game found the sensor, resolved it, opened the Dircon socket, subscribed to
+power and heart rate, and settled into polling its connected-device list twice a
+second — where the previous run had `FATAL UNHANDLED EXCEPTION` there is now
+nothing at all. It also re-browses every couple of minutes and keeps running.
+
+And it shows up where it counts: on that run the Device Connection screen listed
+`FakeTrainer` with live watts. **The in-app path works end to end.**
+
+Worth noting for the next MyWhoosh update: neither `BT_*` poller was called in
+any run measured, BLE being gated natively long before, and the shim is started
+by fakebonjour — so it arrives with the Bonjour path. See
+`../exportshim/README.md` for what to do if that ordering ever changes.
+
+### Launching outside Lutris
+
+Every measurement above was taken this way, and anything touching the game
+process needs it. Lutris supplies environment the game needs; a bare `wine` invocation fails with
 `c0000135` because builtin `dxgi` pulls in `wined3d` → `libvkd3d-1.dll`. What is
 needed:
 

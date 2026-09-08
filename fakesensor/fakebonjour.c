@@ -957,6 +957,118 @@ static const svcVtbl svc_vtbl = {
     svc_Stop,                   /* dispid 12 */
 };
 
+/* ---------------------------------------------- managed export shim (kick) */
+/*
+ * Blocker 4: four of WindowsConnectivity.dll's exports take the device list as
+ * `out DeviceInformationStruct[]`, and wine-mono's native marshaller refuses
+ * that shape -- "Byref array marshalling to managed code is not implemented."
+ * The refusal is compiled into the native-to-managed wrapper as a throw, so the
+ * game's first device-list poll is a fatal unhandled exception.
+ *
+ * ../exportshim serves those four itself, in managed code, by rewriting the
+ * vtable-fixup slots the export stubs jump through -- in memory, so no game
+ * file is touched.  It needs someone inside the game process to load and start
+ * it, and that is this DLL: it is already here, mono is already up, and the
+ * game's managed connectivity init is what put us here, so the poll it dies on
+ * has not happened yet (measured: fakebonjour.dll loads well before the crash).
+ *
+ * The invoke target is a static void method with no arguments, which is the one
+ * shape mono's embedding API can call without marshalling anything -- the whole
+ * problem being marshalled shapes.
+ */
+
+typedef void *(*fn_get_root_domain)(void);
+typedef void *(*fn_domain_get)(void);
+typedef void *(*fn_thread_attach)(void *domain);
+typedef void *(*fn_assembly_open)(void *domain, const char *name);
+typedef void *(*fn_assembly_get_image)(void *assembly);
+typedef void *(*fn_class_from_name)(void *image, const char *ns, const char *name);
+typedef void *(*fn_method_from_name)(void *klass, const char *name, int argc);
+typedef void *(*fn_runtime_invoke)(void *method, void *obj, void **params, void **exc);
+
+/* c:\windows\mono\mono-2.0\bin\libmono-...dll -> ...\mono-2.0\lib\<dll> */
+static int shim_path(HMODULE mono, const char *dll, char *out, size_t n)
+{
+    char self[MAX_PATH];
+    char *slash;
+
+    if (!GetModuleFileNameA(mono, self, sizeof(self))) return 0;
+    slash = strrchr(self, '\\');            /* strip the file name */
+    if (!slash) return 0;
+    *slash = 0;
+    slash = strrchr(self, '\\');            /* strip "bin" */
+    if (!slash) return 0;
+    *slash = 0;
+    _snprintf(out, n, "%s\\lib\\%s", self, dll);
+    out[n - 1] = 0;
+    return 1;
+}
+
+static void shim_kick(void)
+{
+    static LONG once;
+    HMODULE mono;
+    char path[MAX_PATH];
+    const char *env;
+    fn_get_root_domain get_root_domain;
+    fn_domain_get domain_get;
+    fn_thread_attach thread_attach;
+    fn_assembly_open assembly_open;
+    fn_assembly_get_image assembly_get_image;
+    fn_class_from_name class_from_name;
+    fn_method_from_name method_from_name;
+    fn_runtime_invoke runtime_invoke;
+    void *domain, *assembly, *image, *klass, *method, *exc = NULL;
+
+    if (InterlockedCompareExchange(&once, 1, 0) != 0) return;
+
+    env = getenv("MYWHOOSH_SHIM_DLL");
+    if (env && !*env) { logmsg("export shim disabled (MYWHOOSH_SHIM_DLL is empty)"); return; }
+
+    mono = GetModuleHandleA("libmono-2.0-x86_64.dll");
+    if (!mono) mono = GetModuleHandleA("libmono-2.0-x86.dll");
+    if (!mono) { logmsg("export shim: libmono is not loaded, nothing to kick"); return; }
+
+    get_root_domain     = (fn_get_root_domain)    GetProcAddress(mono, "mono_get_root_domain");
+    domain_get          = (fn_domain_get)         GetProcAddress(mono, "mono_domain_get");
+    thread_attach       = (fn_thread_attach)      GetProcAddress(mono, "mono_thread_attach");
+    assembly_open       = (fn_assembly_open)      GetProcAddress(mono, "mono_domain_assembly_open");
+    assembly_get_image  = (fn_assembly_get_image) GetProcAddress(mono, "mono_assembly_get_image");
+    class_from_name     = (fn_class_from_name)    GetProcAddress(mono, "mono_class_from_name");
+    method_from_name    = (fn_method_from_name)   GetProcAddress(mono, "mono_class_get_method_from_name");
+    runtime_invoke      = (fn_runtime_invoke)     GetProcAddress(mono, "mono_runtime_invoke");
+
+    if (!get_root_domain || !domain_get || !thread_attach || !assembly_open
+        || !assembly_get_image || !class_from_name || !method_from_name || !runtime_invoke) {
+        logmsg("export shim: libmono is missing an embedding entry point, giving up");
+        return;
+    }
+
+    if (env) { _snprintf(path, sizeof(path), "%s", env); path[sizeof(path) - 1] = 0; }
+    else if (!shim_path(mono, "MyWhooshShim.dll", path, sizeof(path))) {
+        logmsg("export shim: cannot work out where MyWhooshShim.dll lives");
+        return;
+    }
+
+    domain = domain_get();
+    if (!domain) {
+        domain = get_root_domain();
+        if (!domain) { logmsg("export shim: no mono domain"); return; }
+        thread_attach(domain);
+    }
+
+    assembly = assembly_open(domain, path);
+    if (!assembly) { logmsg("export shim: cannot load %s", path); return; }
+    image = assembly_get_image(assembly);
+    klass = image ? class_from_name(image, "MyWhoosh", "ExportShim") : NULL;
+    method = klass ? method_from_name(klass, "Install", 0) : NULL;
+    if (!method) { logmsg("export shim: MyWhoosh.ExportShim::Install not found in %s", path); return; }
+
+    logmsg("export shim: invoking Install from %s", path);
+    runtime_invoke(method, NULL, NULL, &exc);
+    if (exc) logmsg("export shim: Install threw (see the shim's own log)");
+}
+
 /* --------------------------------------------------------- class factory */
 
 typedef struct {
@@ -983,6 +1095,10 @@ static HRESULT STDMETHODCALLTYPE cf_CreateInstance(IClassFactory *this_, IUnknow
     if (!out) return E_POINTER;
     *out = NULL;
     if (outer) return CLASS_E_NOAGGREGATION;
+
+    /* The game's connectivity init is what got us here, so this is the earliest
+     * moment our own managed code can run inside its process.  See shim_kick. */
+    shim_kick();
 
     if (guid_eq(f->clsid, &CLSID_DNSSDService)) {
         svc *s = svc_new(SVC_MAIN);

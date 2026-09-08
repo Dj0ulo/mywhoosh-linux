@@ -104,4 +104,7 @@ game's own init goes further still, into our Bonjour replacement:
 ```
 
 That is the game process, not a probe, reaching the Dircon stack — blocker 3
-closed. It then hits a new one; see "Blocker 4" in `../dircon/README.md`.
+closed. One blocker was left behind it, the byref-array marshalling the four
+device-list exports need, and `../exportshim/` closes that one; with both in
+place the game discovers, connects to and reads a Dircon sensor by itself. See
+`../dircon/README.md`.

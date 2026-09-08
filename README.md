@@ -61,8 +61,9 @@ to a Bluetooth LE trainer through BlueZ and serves it to the game over Wahoo
 Direct Connect, so real power and cadence arrive without a phone in the loop.
 Measured working on a Tacx Flux, including resistance control.
 
-It is not a drop-in yet -- it needs a patched wine-mono
-(`winemono/`) and takes over Bonjour's two COM classes in the prefix
+It is not a drop-in yet -- it needs a patched wine-mono (`winemono/`), stub
+winmd assemblies (`winmd/`), a shim for four exports wine-mono cannot marshal
+(`exportshim/`), and it takes over Bonjour's two COM classes in the prefix
 (`fakesensor/`). See `fakesensor/README.md`.
 
 ---
@@ -74,6 +75,7 @@ It is not a drop-in yet -- it needs a patched wine-mono
 | `lutris/mywhoosh.yml` | Lutris installer script — automates the full install process |
 | `patch/patch_windows_connectivity_dll.py` | Patches `WindowsConnectivity.dll` to bypass a Bluetooth state check that crashes MyWhoosh under Wine |
 | `winmd/` | Stub `Windows` / `System.Runtime.WindowsRuntime` assemblies — the replacement for that patch |
+| `exportshim/` | Serves the four device-list exports wine-mono refuses to marshal, by redirecting them in memory |
 
 The patcher rewrites the body of
 `BluetoothManager.BluetoothProgram::IsBluetoothEnabled` to `ldc.i4.1; ret` so
