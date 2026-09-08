@@ -239,20 +239,92 @@ Bonjour check either — the prefix it was measured in has the service `RUNNING`
 both `dnssd.dll` and `dnssdX.dll` in `system32`, and
 `SOFTWARE\Apple Inc.\Bonjour` fully populated.
 
-**Open:** why patching suppresses the load *entirely* is not explained. The
-patched DLL loads fine natively under both stock wine-mono 11.1.0 and the
-patched 10.0.0, so it is not an unloadable image; and it is not login state —
-moving `GameData.sav`/`GameMetaKey.sav` aside changed nothing.
+### Why patching suppresses the load: the game hashes the DLL
 
-### Where the fix goes next
+It is not the patch's *content*. **MyWhoosh checks `WindowsConnectivity.dll`'s
+bytes before loading it, and skips the load entirely if any of them changed.**
+Four runs in the never-logged-in prefix, `WINEDEBUG=+loaddll`:
 
-Patch a different method. `BT_InitBluetoothManager` is what dies, so neutering
-*it* — rather than `IsBluetoothEnabled` — should let the game's own init get
-past Bluetooth and carry on into the Dircon path, which is exactly where the
-verified stack plugs in. Cheapest first: early-return `BT_InitBluetoothManager`;
-retype or drop the `advertisment` field; or supply a stub assembly satisfying
-`Windows`. A prefix that has never got past the crash runs the init on every
-launch, which makes it the test bed.
+| `WindowsConnectivity.dll` | `mscoree` + the DLL load? |
+|---|---|
+| pristine | yes → `TypeLoadException` in `BT_InitBluetoothManager` |
+| pristine bytes, fresh mtime | yes → same crash |
+| `advertisment` retyped to `object` (4 bytes of metadata) | **no** |
+| one character of the DOS stub, `'T'`→`'t'` (1 byte of padding) | **no** |
+
+The mtime run rules out a timestamp check; the DOS-stub run is decisive, since
+those bytes mean nothing to any loader, so nothing about the *edit* can be what
+was rejected. The game reaches the same point either way — the branch where
+`mscoree` would load, right after DXVK spins up its compiler threads — and in
+the modified case simply carries on to `hid.dll`, XINPUT and the UI.
+
+Whose check it is, is not in doubt: the DLL has no Authenticode signature (empty
+certificate table) and no PE checksum, so Wine verifies nothing. Where the
+expected value lives is still open — the DLL's MD5, SHA-1 and SHA-256 appear
+nowhere in the exe (raw, ASCII or UTF-16) nor anywhere in the game tree, so it
+is neither a plain stored hash nor a manifest.
+
+This kills every approach that edits the DLL — retyping the field, dropping it,
+early-returning `BT_InitBluetoothManager` alike — and it means the working patch
+today "works" only by preventing the load it was meant to survive.
+
+### The fix: satisfy the reference instead of removing it
+
+The reference is what is missing, so supply it. `../winmd/` builds stub
+`Windows` and `System.Runtime.WindowsRuntime` assemblies into the prefix's
+wine-mono tree, where mono probes for them
+(`C:\windows\mono\mono-2.0\lib\Windows.dll`) — outside the game tree, so
+every game file stays byte-identical.
+
+With them installed and the DLL pristine, on the never-logged-in prefix:
+
+```
+mscoree → WindowsConnectivity.dll → libmono → mscorlib → Windows.dll
+  → System → System.ServiceProcess → System.Core → System.Runtime.WindowsRuntime
+```
+
+no exception anywhere in the trace, and the game keeps running — measured over
+100 s, `svcctl_EnumServicesStatusExW` recurring, which is `GetBonjourService()`
+inside the Dircon manager. **Blocker 3 is closed: the game asks.**
+
+## Blocker 4 — byref array marshalling (wine-mono)
+
+On the full stack — patched wine-mono plus `../fakesensor` — the game's own init
+goes all the way into our Bonjour replacement, in the game process:
+
+```
+[fakebonjour] created DNSSDEventManager -> 0x00000000
+[fakebonjour] Advise: sink … (_IDNSSDEvents …), events start at vtable slot 7
+[fakebonjour] created DNSSDService -> 0x00000000
+```
+
+Twice over, one pair per manager. Then:
+
+```
+[ERROR] FATAL UNHANDLED EXCEPTION:
+System.Runtime.InteropServices.MarshalDirectiveException:
+  Byref array marshalling to managed code is not implemented.
+```
+
+Four exports have a byref-array parameter, and they are exactly the ones the
+game polls for its device lists:
+
+```
+BT_GetScannedDevicesList    int (ref DeviceInformationStruct[])
+BT_GetConnectedDevicesList  int (ref DeviceInformationStruct[])
+WD_GetScannedDevicesList    int (ref DeviceInformationStruct[])
+WD_GetConnectedDevicesList  int (ref DeviceInformationStruct[])
+```
+
+Mono raises this while *building* the native-to-managed wrapper, so the first
+call to any of the four takes the process down. This never showed up before
+because `TestDircon` and the probes call the managed methods directly; only the
+game goes through the reverse-P/Invoke thunk.
+
+It is not fixed by a newer runtime: both wine-mono 10.0.0 and 11.1.0 carry the
+error string in `libmono-2.0-x86_64.dll`. Unlike `ComAwareEventInfo`, this one
+is in the native marshaller, not in a managed BCL assembly, so the Cecil pass in
+`../winemono/` cannot reach it.
 
 ### Reproducing this outside Lutris
 

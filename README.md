@@ -73,16 +73,22 @@ It is not a drop-in yet -- it needs a patched wine-mono
 |------|---------|
 | `lutris/mywhoosh.yml` | Lutris installer script — automates the full install process |
 | `patch/patch_windows_connectivity_dll.py` | Patches `WindowsConnectivity.dll` to bypass a Bluetooth state check that crashes MyWhoosh under Wine |
+| `winmd/` | Stub `Windows` / `System.Runtime.WindowsRuntime` assemblies — the replacement for that patch |
 
 The patcher rewrites the body of
 `BluetoothManager.BluetoothProgram::IsBluetoothEnabled` to `ldc.i4.1; ret` so
 the check always returns `true` — two bytes, at whatever offset the method is
 found at by name (`0xc70` on 6.1.2), rather than a hardcoded one.
 
-**Caveat, measured on 6.1.2:** those two bytes are also why no sensor stack
-works. Unpatched, the game loads `WindowsConnectivity.dll` at startup and dies
-in `BT_InitBluetoothManager` with a `TypeLoadException` on a WinRT-typed field;
-patched, it never loads the DLL at all, so its Bluetooth, ANT+ and Direct
-Connect paths are all inert and the UI gates them behind native checks. The
-patch buys a game that launches, at the cost of every in-app sensor route. See
-`dircon/README.md`, *Blocker 3*.
+**Why it works is not why it was written, measured on 6.1.2:** MyWhoosh hashes
+`WindowsConnectivity.dll` and skips loading it if *any* byte changed — a single
+altered character of the DOS stub is enough. So the patch buys a game that
+launches by stopping the DLL loading at all, and with it every in-app sensor
+route: Bluetooth, ANT+ and Direct Connect alike.
+
+`winmd/` replaces it. Unpatched, the game dies in `BT_InitBluetoothManager` with
+a `TypeLoadException` on a field typed from the `Windows` winmd, which Wine does
+not have; supplying that winmd as a stub assembly in the prefix's wine-mono tree
+fixes the crash with every game file left byte-identical, and the game then runs
+its own connectivity init. See `winmd/README.md` and `dircon/README.md`,
+*Blocker 3*.
