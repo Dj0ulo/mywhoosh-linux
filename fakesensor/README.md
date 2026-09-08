@@ -110,6 +110,44 @@ cadence come from Indoor Bike Data.
 does not take it from there. `hr` is `0` because nothing here is a heart-rate
 strap -- pair one as `E_HeartRate` and it would be a second device, not this one.
 
+## Real hardware, in the game
+
+`blebridge.py` serves an actual BLE trainer over the same socket, and with the
+rest of the stack installed the game drives it by itself. Measured on a Tacx
+Flux 06189, MyWhoosh 6.1.2, `FAKESENSOR_EXTERNAL=1`:
+
+```
+bridge: Tacx Flux 06189 connected: 2 service(s) exposed   Cycling Power + Fitness Machine
+bridge: listening on 127.0.0.1:36866
+[fakebonjour] ServiceFound("Tacx-Flux-06189")             -> 0x00000000
+[fakebonjour] ServiceResolved(… at Tacx-Flux-06189.local.:36866)
+bridge: client connected
+bridge: notify 00002ad2 on            Indoor Bike Data
+bridge: notify 00002ada on            Fitness Machine Status
+bridge: notify 00002ad9 on            Control Point indications
+bridge: write  00002ad9 <- 00         Request Control
+bridge: write  00002ad9 <- 01         Reset
+bridge: write  00002ad9 <- 11000000000000   Set Indoor Bike Simulation Parameters
+```
+
+and the game's Device Connection screen shows the trainer connected with watts
+that move when you pedal. The control-point writes are the half that cannot be
+faked: grade and resistance from the game reach the hardware.
+
+Two things this turned up, neither in this stack:
+
+- **Give a real trainer its own serial.** MyWhoosh keys its saved pairing on the
+  Dircon serial and then displays the *stored* name, so a trainer advertised on
+  fakebonjour's default serial comes up under whatever name last used it --
+  observed, as a real Tacx reporting live watts while labelled `FakeTrainer`.
+  `blebridge.py` now prints a `FAKESENSOR_SERIAL` derived from the device
+  address; pass it along with `FAKESENSOR_NAME`.
+- **A device the game already knows does not appear in a scan.** With the
+  pairing saved, the game auto-connects on startup and `Browse`/`Resolve` keep
+  firing while `WD_GetScannedDevicesList` returns 0, so the search list looks
+  empty. Auto-connect covers the case; a first-time pairing on a fresh serial is
+  the path that needs checking.
+
 ## It also starts the export shim
 
 `fakebonjour.c` does one thing that has nothing to do with Bonjour: on its first

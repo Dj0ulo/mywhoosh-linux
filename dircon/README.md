@@ -377,7 +377,11 @@ second — where the previous run had `FATAL UNHANDLED EXCEPTION` there is now
 nothing at all. It also re-browses every couple of minutes and keeps running.
 
 And it shows up where it counts: on that run the Device Connection screen listed
-`FakeTrainer` with live watts. **The in-app path works end to end.**
+`FakeTrainer` with live watts. Repeated against a real trainer through
+`../fakesensor/blebridge.py`, the game auto-connects a Tacx Flux, subscribes to
+its Indoor Bike Data and writes grade to its control point, and the screen shows
+watts that move when you pedal. **The in-app path works end to end, on real
+hardware.**
 
 Worth noting for the next MyWhoosh update: neither `BT_*` poller was called in
 any run measured, BLE being gated natively long before, and the shim is started

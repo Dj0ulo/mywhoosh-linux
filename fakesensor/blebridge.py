@@ -24,6 +24,9 @@ Usage:
 Then, in the prefix that has fakebonjour installed:
     FAKESENSOR_EXTERNAL=1 ./run.sh 12 20
 which stops the DLL from binding the port itself and lets it advertise this one.
+On startup this prints the FAKESENSOR_NAME/SERIAL to advertise it under; pass
+them both, or the game keys its saved pairing on the default serial and shows
+the previous sensor's name for your trainer.
 """
 
 import argparse
@@ -441,8 +444,15 @@ def main():
 
     name = b.connect()
     b.listen(args.host)
-    log("advertise this as: FAKESENSOR_NAME=%r FAKESENSOR_PORT=%d",
-        name.replace(" ", "-"), args.port)
+    # The serial is the device's identity as far as MyWhoosh is concerned: it
+    # keys its saved pairing on it and then shows the *stored* name, so leaving
+    # fakebonjour's default serial in place makes a real trainer come up under
+    # whatever name the last sensor on that serial had -- and makes the game
+    # treat it as already known, which keeps it out of the scan results.
+    # Derive one from the address so every trainer is its own device.
+    serial = int(b.mac.replace(":", ""), 16)
+    log("advertise this as: FAKESENSOR_NAME=%r FAKESENSOR_SERIAL=%d FAKESENSOR_PORT=%d",
+        name.replace(" ", "-"), serial, args.port)
     try:
         GLib.MainLoop().run()
     except KeyboardInterrupt:
