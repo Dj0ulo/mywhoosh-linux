@@ -14,7 +14,9 @@ This directory contains the probes used to find out how far it actually gets.
 
 ## Result
 
-Both blockers are dealt with, and the whole path runs:
+Both original blockers are dealt with and the whole path runs — but on
+MyWhoosh 6.1.2 a third one appeared, and it is now the one that matters: the
+game never calls this code at all. See *Blocker 3* below.
 
 - Blocker 1 is **fixed** — `../winemono/` patches wine-mono's
   `ComAwareEventInfo` and installs the result into a prefix.
@@ -22,6 +24,9 @@ Both blockers are dealt with, and the whole path runs:
   with an in-proc COM server of our own, so nothing depends on mDNSResponder
   hearing a packet. With both in place the game's own `WD_GetPower()` and
   `WD_GetHeart()` return live values from a sensor served over loopback TCP.
+- Blocker 3 is **open** — the two bytes that stop 6.1.2 crashing at launch also
+  stop it ever loading `WindowsConnectivity.dll`, so none of the above is
+  reached from the game itself.
 
 | Step | Status |
 |---|---|
@@ -35,6 +40,8 @@ Both blockers are dealt with, and the whole path runs:
 | `WD_InitWahooDirconManager()` … `WD_StopScanningAll()` | works |
 | **mDNSResponder actually discovering anything** | **never joins the multicast group** |
 | Discovery, pairing and live data with Bonjour replaced | works — see `../fakesensor/` |
+| The game's own native `LoadLibrary` + `GetProcAddress` call path | works |
+| **The game actually calling any of it on 6.1.2** | **blocked — see Blocker 3** |
 
 ### Blocker 1 — `ComAwareEventInfo` is a throw-only stub in wine-mono (fixed)
 
@@ -137,6 +144,135 @@ events under wine-mono even with mDNS working.
 `../winemono/SinkInvokeProbe.cs` is the measurement; `../fakesensor/README.md`
 has the details and the other three things that had to be measured.
 
+## Blocker 3 — the game never asks (MyWhoosh 6.1.2)
+
+Everything above was measured from `TestDircon`, a *managed* process calling the
+`WD_*` methods directly. The game is a *native* process, and it reaches the same
+code a different way. Measured on 6.1.2, that difference turns out to be where
+the whole thing now stands or falls: **the stack works, and the game does not
+call it.**
+
+6.1.2 itself changes nothing relevant. The `WD_*` surface is name-for-name
+identical to the build everything above was measured against (44 methods), and
+`WFTNP_Init`, `ComAwareEventInfo`, `DirconSensor` and `_IDNSSDEvents` (same IID)
+are all still there. Only the path moved: `WindowsConnectivity.dll` now lives in
+`MyWhoosh/Binaries/Win64/`, not `Content/Libraries/Win64/`, which keeps only
+`Dircon/bonjoursdksetup.exe`.
+
+### The game's real call path works
+
+`WindowsConnectivity.dll` carries 98 unmanaged exports — `BT_*`, `WD_*`, `OBC_*`
+— in `.sdata`, which `objdump -p` prints as an empty export table (parse the
+export directory directly; it is there). So the native exe does
+`LoadLibrary` + `GetProcAddress` and lets `mscoree` bootstrap the CLR on load.
+That path is healthy under Wine, patched DLL and all:
+
+```
+LoadLibrary("WindowsConnectivity.dll")  OK at 0000000180000000
+mscoree loaded                          yes
+WD_InitWahooDirconManager()             returned
+WD_GetDirconServiceAvailability()       = 1
+WD_GetNetworkState()                    = 1
+```
+
+Two things worth knowing about calling it this way. Order is not optional: a
+`WD_*` getter before `WD_InitWahooDirconManager` does not return false, it
+raises `NullReferenceException` as a **fatal unhandled exception** and takes the
+process with it (`dirconManager` is null and the getters `callvirt` it). And the
+apartment matters as much as it does for the harness — `CoInitialize(NULL)` plus
+a message pump, since the Bonjour objects are STA.
+
+### The patch and the connectivity stack are mutually exclusive
+
+This is the finding. Same prefix, same launch, only the two patch bytes differ:
+
+| `WindowsConnectivity.dll` | What the game does at startup |
+|---|---|
+| **unpatched** | `mscoree` → `WindowsConnectivity.dll` → `libmono` → `mscorlib` → `System` → `System.ServiceProcess` → `System.Core` → crash |
+| **patched** | never loads the DLL at all; game runs |
+
+Reproduced twice in each direction under `WINEDEBUG=+loaddll`. The patch is what
+makes the game start, and it is also why nothing here ever gets called.
+
+The crash names its own cause, and it is not the Bluetooth *state* check:
+
+```
+Unhandled Exception:
+System.TypeLoadException: Could not load type of field
+  'BluetoothManager.BluetoothProgram:advertisment' (0) due to:
+  Could not load file or assembly 'Windows, Version=255.255.255.255, ...'
+  at (wrapper native-to-managed) FunctionsManager.MyWhoosh.BT_InitBluetoothManager()
+```
+
+A field typed from the `Windows` winmd, so the *class* cannot be laid out.
+Patching `IsBluetoothEnabled` does not fix that; it only stops anything ever
+touching the class.
+
+**And the caller we need exists.** In that same unpatched trace,
+`System.ServiceProcess` (that is `ServiceController.GetServices()` inside
+`GetBonjourService()` — `svcctl_EnumServicesStatusExW` right behind it) and
+`System.Core` (that is `ComAwareEventInfo`) both load *before* the Bluetooth
+exception. The game really does run `WD_InitWahooDirconManager` at startup,
+ahead of Bluetooth. It just dies on Bluetooth immediately afterwards, and the
+patch avoids that death by preventing the whole init.
+
+### What the UI does once you are past startup
+
+With the patch in place the game reaches its Device Connection screen and gates
+each transport *natively*, before any managed call:
+
+- **BLE** hints "enable bluetooth" — even with `IsBluetoothEnabled` patched to
+  return true, because nothing consults it.
+- **Direct Connect** shows "Dircon Service Unavailable … proceed with
+  installation?" Answering yes changes nothing: `WD_InstallDirconService` is
+  managed code that never loads. The prompt string lives in
+  `MyWhoosh-Win64-Shipping.exe`, not in the managed DLL, along
+  `IsDirconServiceAvailabe`, `SetDirconServiceFeatureAvailability` and
+  `IsWahooDirconAllowed` (a field of a native `ConnectivityFeatures` struct next
+  to `IsBluetoothAllowed`/`IsANTAllowed`).
+
+Measured, so it is not guesswork: with `+loaddll`, `+module` and `+reg` on a
+full session including clicking the option, `WindowsConnectivity`, `mscoree` and
+mono appear **zero** times in the game process, and there are no game-side
+registry reads of any `Bonjour`/`Apple Inc.` key. The gate is not a local
+Bonjour check either — the prefix it was measured in has the service `RUNNING`,
+both `dnssd.dll` and `dnssdX.dll` in `system32`, and
+`SOFTWARE\Apple Inc.\Bonjour` fully populated.
+
+**Open:** why patching suppresses the load *entirely* is not explained. The
+patched DLL loads fine natively under both stock wine-mono 11.1.0 and the
+patched 10.0.0, so it is not an unloadable image; and it is not login state —
+moving `GameData.sav`/`GameMetaKey.sav` aside changed nothing.
+
+### Where the fix goes next
+
+Patch a different method. `BT_InitBluetoothManager` is what dies, so neutering
+*it* — rather than `IsBluetoothEnabled` — should let the game's own init get
+past Bluetooth and carry on into the Dircon path, which is exactly where the
+verified stack plugs in. Cheapest first: early-return `BT_InitBluetoothManager`;
+retype or drop the `advertisment` field; or supply a stub assembly satisfying
+`Windows`. A prefix that has never got past the crash runs the init on every
+launch, which makes it the test bed.
+
+### Reproducing this outside Lutris
+
+Lutris supplies environment the game needs; a bare `wine` invocation fails with
+`c0000135` because builtin `dxgi` pulls in `wined3d` → `libvkd3d-1.dll`. What is
+needed:
+
+```sh
+R=$HOME/.local/share/lutris/runners/wine/GE-Proton10-4
+export WINEDLLOVERRIDES="d3d11,d3d10core,d3d9,dxgi=n"
+export WINEDLLPATH="$R/lib/vkd3d/x86_64-windows:$R/lib/wine/x86_64-windows"
+export LD_LIBRARY_PATH="$R/lib:$LD_LIBRARY_PATH"
+export WINEFSYNC=1 WINEESYNC=1 WINEDEBUG=+loaddll
+cd "$WINEPREFIX/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64"
+"$R/bin/wine" MyWhoosh-Win64-Shipping.exe MyWhoosh
+```
+
+`wine`/`sc query` cannot attach to a prefix Lutris is running without the same
+`WINEFSYNC`, which is worth remembering before concluding a service is dead.
+
 ## Probes
 
 All of them run against the game's own `WindowsConnectivity.dll` and print a
@@ -167,7 +303,7 @@ rather than merely failing. The game, being Unreal, pumps anyway.
 ./run.sh 20 10             # 20s scan, then 10s of readings
 
 # or against another prefix / another install:
-GAME_LIBS=/path/to/Content/Libraries/Win64 WINEPREFIX=/path/to/prefix ./run.sh
+GAME_LIBS=/path/to/MyWhoosh/Binaries/Win64 WINEPREFIX=/path/to/prefix ./run.sh
 DIRCON_TRACE=1 ./run.sh    # full stack traces on failure
 ```
 

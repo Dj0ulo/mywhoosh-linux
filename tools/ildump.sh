@@ -9,7 +9,7 @@
 set -e
 cd "$(dirname "$0")"
 
-GAME_LIBS="${GAME_LIBS:-$HOME/Games/mywhoosh/drive_c/MyWhoosh/MyWhoosh/Content/Libraries/Win64}"
+GAME_LIBS="${GAME_LIBS:-$HOME/Games/mywhoosh/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64}"
 export WINEPREFIX="${WINEPREFIX:-$HOME/Games/mywhoosh}"
 WINE="${WINE:-$HOME/.local/share/lutris/runners/wine/GE-Proton10-4/bin/wine}"
 [ -x "$WINE" ] || WINE=wine

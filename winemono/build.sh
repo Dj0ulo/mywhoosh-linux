@@ -25,7 +25,7 @@ mcs -out:build/PatchSystemCore.exe -r:build/Mono.Cecil.dll PatchSystemCore.cs
 mcs -platform:x64 -out:build/ShimProbe.exe ShimProbe.cs
 
 # SinkEmitProbe needs the game's embedded Bonjour interop types.
-GAME_LIBS="${GAME_LIBS:-$HOME/Games/mywhoosh/drive_c/MyWhoosh/MyWhoosh/Content/Libraries/Win64}"
+GAME_LIBS="${GAME_LIBS:-$HOME/Games/mywhoosh/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64}"
 if [ -f "$GAME_LIBS/WindowsConnectivity.dll" ]; then
     cp -f "$GAME_LIBS/WindowsConnectivity.dll" build/
     mcs -platform:x64 -out:build/SinkEmitProbe.exe -r:build/MyWhoosh.ComEventShim.dll \
