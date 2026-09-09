@@ -31,6 +31,9 @@ WINEPREFIX=<prefix> wine SigDump.exe WindowsConnectivity.dll   # the *DevicesLis
 WINEPREFIX=<prefix> wine AllSigs.exe WindowsConnectivity.dll   # all 98 exports, odd params flagged
 ```
 
+`Types.cs` is the same idea, smaller: it just lists every type in an assembly,
+which is how you find the class to point `ildump.sh` at.
+
 Run them under wine-mono, not the host Mono: `Marshal.SizeOf` has to be the
 runtime the game will actually use (it reports 64 bytes for
 `DeviceInformationStruct`), and the host lacks `System.ServiceProcess`.

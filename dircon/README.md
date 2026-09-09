@@ -374,7 +374,8 @@ game's own threads throughout:
 The game found the sensor, resolved it, opened the Dircon socket, subscribed to
 power and heart rate, and settled into polling its connected-device list twice a
 second — where the previous run had `FATAL UNHANDLED EXCEPTION` there is now
-nothing at all. It also re-browses every couple of minutes and keeps running.
+nothing at all, and it kept running to a clean exit. (The repeated `Browse`
+calls in a log are someone pressing search, not the game polling on its own.)
 
 And it shows up where it counts: on that run the Device Connection screen listed
 `FakeTrainer` with live watts. Repeated against a real trainer through

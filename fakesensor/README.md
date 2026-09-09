@@ -134,6 +134,51 @@ and the game's Device Connection screen shows the trainer connected with watts
 that move when you pedal. The control-point writes are the half that cannot be
 faked: grade and resistance from the game reach the hardware.
 
+### What the trainer says it can do
+
+`blebridge.py` logs the first notification of each characteristic, and Indoor
+Bike Data (`0x2AD2`) every few seconds with its flags decoded. That is not
+decoration: MyWhoosh reads those flags *once*, on the first notification, to
+decide what the device can provide, and only then starts parsing values.
+`DirconSensor.ProcessIndoorBikeDataNotification` sets `hasCadenceFrom2AD2` from
+flag bit 2, `SensorBase.SetDevicePreference` turns that into
+`getCadenceFrom2AD2`, and the cadence field is parsed only when that is set --
+so a trainer that omits the bit gets no cadence at all, no matter what else it
+supports. Cadence, power and controllable are each announced to the game as a
+separate device (`SendConnectCallback` with 3, 1 and 2), so one trainer fills
+several slots.
+
+Measured on the Tacx Flux 06189:
+
+```
+notification 00002ad2  flags=0x0044 [InstantaneousSpeed InstantaneousCadence
+                                     InstantaneousPower] power=25W cadence=35rpm
+notification 00002ad9  800001        Request Control -> Success
+```
+
+and its capability characteristics, read once it is awake:
+
+| Characteristic | Value | Means |
+|---|---|---|
+| `0x2ACC` Fitness Machine Feature | `0x00004082` | Cadence, ResistanceLevel, PowerMeasurement |
+| `0x2ACC` Target Setting Feature | `0x0000a00c` | ResistanceTarget, PowerTarget (ERG), IndoorBikeSimulation, SpinDownControl |
+| `0x2A65` Cycling Power Feature | `0x0000000c` | WheelRevolutionData, CrankRevolutionData |
+| `0x2AD8` Supported Power Range | `0`–`800` W, step 1 | ERG range |
+| `0x2AD6` Supported Resistance Range | `0`–`1000`, step 1 | |
+
+So cadence is available twice over -- through the FTMS flag the game actually
+uses, and through crank revolutions on `0x2A63` as a fallback the game can parse
+but does not subscribe to.
+
+**A sleeping trainer looks like a bridge bug.** With the Flux asleep, the three
+read-only capability characteristics fail with `org.bluez.Error.Failed` and the
+game learns nothing about it, while the game still reports a connected device
+because its Dircon socket to the bridge is perfectly healthy. The tell is that
+BlueZ has dropped the device object entirely (it is not in `bluetoothctl
+devices` and not advertising). Pedal to wake it and restart the bridge.
+`Read not permitted` on `0x2AD2`/`0x2A63` is not that -- those are notify-only,
+and the game never reads them.
+
 Two things this turned up, neither in this stack:
 
 - **Give a real trainer its own serial.** MyWhoosh keys its saved pairing on the

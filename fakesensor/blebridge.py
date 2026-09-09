@@ -16,6 +16,11 @@ reads, 4 writes, 5 subscribes, and 6 is a notification pushed by the server.  So
 every service the trainer really has is what the game really sees -- including
 its control point, so resistance writes reach the hardware.
 
+A trainer that stops being pedalled drops its radio, and BlueZ then removes the
+device entirely; the bridge waits for it to advertise again, reconnects and
+restores the client's subscriptions, leaving the Dircon socket up so the game
+never sees its device go away.
+
 Usage:
     ./blebridge.py                      # pick the first fitness device seen
     ./blebridge.py --mac FA:55:E5:BE:21:A5 --port 36866
@@ -33,6 +38,7 @@ import argparse
 import errno
 import socket
 import struct
+import time
 import sys
 import uuid
 
@@ -51,6 +57,59 @@ CHAR_IFACE = "org.bluez.GattCharacteristic1"
 
 def u16(x):
     return "%08x-0000-1000-8000-00805f9b34fb" % x
+
+
+# Indoor Bike Data (0x2AD2) flags, LSB first.  Worth decoding rather than
+# guessing: MyWhoosh reads exactly these bits on the first notification to
+# decide what the trainer can provide, and only then starts reading the values.
+# Notably cadence -- DirconSensor.ProcessIndoorBikeDataNotification sets
+# hasCadenceFrom2AD2 from bit 2, SetDevicePreference turns that into
+# getCadenceFrom2AD2, and without it the cadence field is never parsed at all.
+IBD_FLAGS = [
+    (0, "InstantaneousSpeed", True),   # bit 0 is "More Data": 0 means speed present
+    (1, "AverageSpeed", False),
+    (2, "InstantaneousCadence", False),
+    (3, "AverageCadence", False),
+    (4, "TotalDistance", False),
+    (5, "ResistanceLevel", False),
+    (6, "InstantaneousPower", False),
+    (7, "AveragePower", False),
+    (8, "ExpendedEnergy", False),
+    (9, "HeartRate", False),
+    (10, "MetabolicEquivalent", False),
+    (11, "ElapsedTime", False),
+    (12, "RemainingTime", False),
+]
+
+
+def describe_ibd(value):
+    """What an Indoor Bike Data notification says it carries, and the fields
+    MyWhoosh cares about, parsed the way the game parses them."""
+    if len(value) < 2:
+        return "short (%d bytes)" % len(value)
+    flags = value[0] | (value[1] << 8)
+    present = [name for bit, name, inverted in IBD_FLAGS
+               if bool(flags >> bit & 1) != inverted]
+
+    # Fields appear in flag order; walk them to find cadence and power.
+    off, cadence, power = 2, None, None
+    for bit, name, inverted in IBD_FLAGS:
+        if bool(flags >> bit & 1) == inverted:
+            continue
+        size = {"TotalDistance": 3, "ExpendedEnergy": 6, "HeartRate": 1,
+                "MetabolicEquivalent": 1}.get(name, 2)
+        if name == "InstantaneousCadence" and off + 2 <= len(value):
+            cadence = (value[off] | (value[off + 1] << 8)) / 2.0   # 0.5 rpm units
+        if name == "InstantaneousPower" and off + 2 <= len(value):
+            power = int.from_bytes(value[off:off + 2], "little", signed=True)
+        off += size
+
+    out = "flags=0x%04x [%s]" % (flags, " ".join(present))
+    if power is not None:
+        out += " power=%dW" % power
+    if cadence is not None:
+        out += " cadence=%.0frpm" % cadence
+    return out
 
 
 # The services worth exposing to a cycling game.  Everything else on a trainer
@@ -103,8 +162,11 @@ class Bridge:
         self.services = {}        # service uuid -> [(char uuid, props, char path)]
         self.by_char = {}         # char uuid -> char path
         self.notifying = set()    # char uuids the client subscribed to
+        self.traced = set()       # char uuids already logged once
+        self.traced_at = {}       # ... and when they were last logged
         self.client = None
         self.buf = b""
+        self.reconnecting = False
         self.om = dbus.Interface(bus.get_object(BLUEZ, "/"), OM_IFACE)
 
     # ---------------------------------------------------------------- BlueZ
@@ -182,6 +244,13 @@ class Bridge:
         if not props.Get(DEVICE_IFACE, "Connected"):
             log("connecting to %s", self.mac)
             dev.Connect()
+        try:
+            # A trainer that is not trusted is one BlueZ will not reconnect on
+            # its own, and this one drops its radio the moment you stop pedalling.
+            if not props.Get(DEVICE_IFACE, "Trusted"):
+                props.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
+        except dbus.DBusException:
+            pass
 
         loop = GLib.MainLoop()
         state = {"ok": False}
@@ -255,10 +324,78 @@ class Bridge:
                 break
         else:
             return
-        if cu not in self.notifying or not self.client:
+        if cu not in self.notifying:
             return
         value = bytes(bytearray(changed["Value"]))
+        self.trace_notification(cu, value)
+        if not self.client:
+            return
         self.send(MSG_NOTIFICATION, 0, RC_OK, uuid.UUID(cu).bytes + value)
+
+    def trace_notification(self, cu, value):
+        """Log the first notification of each characteristic, and then keep
+        logging Indoor Bike Data every few seconds -- what the trainer actually
+        puts on the wire is the only way to tell whether the game *can* have
+        cadence from it."""
+        first = cu not in self.traced
+        self.traced.add(cu)
+        is_ibd = cu == u16(0x2AD2)
+        now = time.monotonic()
+        if not first and not (is_ibd and now - self.traced_at.get(cu, 0) >= 5):
+            return
+        self.traced_at[cu] = now
+        if is_ibd:
+            log("notification %s  %s", cu[:8], describe_ibd(value))
+        elif first:
+            log("notification %s  %s", cu[:8], value.hex())
+
+    # ------------------------------------------------------------ reconnect
+
+    def alive(self):
+        """Is the trainer still on the end of a working GATT link?"""
+        if not self.dev_path:
+            return False
+        ifaces = self.objects().get(self.dev_path)
+        if not ifaces:
+            # BlueZ drops the object entirely for a non-bonded device that goes
+            # away, which is what a sleeping trainer looks like from here.
+            return False
+        d = ifaces.get(DEVICE_IFACE, {})
+        return bool(d.get("Connected")) and bool(d.get("ServicesResolved"))
+
+    def watchdog(self):
+        """A trainer sleeping is normal, so treat it as normal: notice, wait for
+        it to advertise again, reconnect, and put the client's subscriptions
+        back. The Dircon socket is deliberately left up -- as far as the game is
+        concerned its device never went anywhere, and data simply resumes."""
+        if self.reconnecting or self.alive():
+            return True
+        self.reconnecting = True
+        try:
+            log("trainer is gone (asleep or out of range); waiting for it")
+            self.services, self.by_char = {}, {}
+            try:
+                self.connect()
+            except (SystemExit, dbus.DBusException) as e:
+                log("  not back yet (%s); will keep trying", e)
+                return True
+
+            resubscribed = 0
+            for cu in sorted(self.notifying):
+                try:
+                    self.char_iface(cu).StartNotify()
+                    resubscribed += 1
+                except dbus.DBusException as e:
+                    log("  could not resubscribe %s: %s", cu[:8], e.get_dbus_name())
+            log("reconnected; %d subscription(s) restored, client %s",
+                resubscribed, "still attached" if self.client else "not attached")
+            # The flags are read once per notification stream, so let them be
+            # logged again for the new one.
+            self.traced.clear()
+            self.traced_at.clear()
+            return True
+        finally:
+            self.reconnecting = False
 
     # --------------------------------------------------------------- Dircon
 
@@ -444,6 +581,7 @@ def main():
 
     name = b.connect()
     b.listen(args.host)
+    GLib.timeout_add_seconds(5, b.watchdog)
     # The serial is the device's identity as far as MyWhoosh is concerned: it
     # keys its saved pairing on it and then shows the *stored* name, so leaving
     # fakebonjour's default serial in place makes a real trainer come up under
