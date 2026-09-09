@@ -24,7 +24,11 @@ if [ "$1" = "--restore" ]; then
     exit 0
 fi
 
-[ -f build/MyWhooshShim.dll ] || ./build.sh
+if [ ! -f build/MyWhooshShim.dll ]; then
+    # A release bundle ships build/ prepopulated and has no build.sh at all.
+    [ -x ./build.sh ] || { echo "missing build/MyWhooshShim.dll and no build.sh" >&2; exit 1; }
+    ./build.sh
+fi
 cp -f build/MyWhooshShim.dll "$TARGET/MyWhooshShim.dll"
 echo "  installed $TARGET/MyWhooshShim.dll"
 echo "done -- reinstall ../fakesensor too if its kick is not in the prefix yet"

@@ -1,0 +1,72 @@
+name: MyWhoosh
+game_slug: mywhoosh
+version: Microsoft Store (in-app connectivity)
+description: |
+  Installs MyWhoosh and lets it use its own device connection screen, so a
+  trainer can be connected from inside the game instead of through the phone
+  companion app.
+
+  Unlike the standard installer this one does not patch WindowsConnectivity.dll.
+  That patch makes the game start by making it stop loading the DLL at all --
+  MyWhoosh hashes it and skips the load if a single byte differs -- and with it
+  applied every in-app sensor route is gone.  Instead a small prebuilt stack is
+  installed next to the prefix: a patched copy of the prefix's wine-mono, the
+  two winmd stub assemblies Wine lacks, a shim for four exports wine-mono
+  cannot marshal, and a stand-in for Apple's Bonjour.  Every game file is left
+  byte-identical.
+
+  Nothing has to be compiled and nothing of Apple's is needed: Lutris' own Wine
+  is the only requirement.
+
+  To connect a real Bluetooth trainer, run fakesensor/blebridge.py from the
+  same bundle on the Linux side and add FAKESENSOR_EXTERNAL=1 to the game's
+  environment; it prints the FAKESENSOR_NAME and FAKESENSOR_SERIAL to use.
+  Without it the prefix serves one hard-coded sensor, which is what the
+  FAKESENSOR_NAME/POWER/BPM variables below configure.
+
+  Details: https://github.com/Dj0ulo/mywhoosh-linux
+
+slug: mywhoosh-ms-store
+runner: wine
+script:
+  files:
+    - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms_store_download.py
+    - connectivity: https://github.com/Dj0ulo/mywhoosh-linux/releases/download/v0.2.0/mywhoosh-connectivity-v0.2.0.tar.gz
+  game:
+    exe: drive_c/MyWhoosh/MyWhoosh.exe
+    prefix: $GAMEDIR
+    arch: win64
+  wine:
+    dxvk: true
+  system:
+    env:
+      # Wine cannot resolve the .local name the game gets back from discovery.
+      LD_PRELOAD: $GAMEDIR/dotlocal_shim.so
+      # The hard-coded sensor.  Set FAKESENSOR_EXTERNAL=1 to use blebridge.py
+      # against real hardware instead.
+      FAKESENSOR_NAME: FakeTrainer
+      FAKESENSOR_POWER: '150'
+      FAKESENSOR_BPM: '75'
+      FAKESENSOR_LOG: $GAMEDIR/fakesensor.log
+  installer:
+    - task:
+        name: create_prefix
+        prefix: $GAMEDIR
+        arch: win64
+    - mkdir: $GAMEDIR/drive_c/MyWhoosh
+    - execute:
+        description: Downloading MyWhoosh app from Microsoft Store
+        file: python3
+        args: $downloader 9ndh0f2vhzx2 --download --extract $GAMEDIR/drive_c/MyWhoosh --extract-flat
+    - move:
+        src: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh.exe
+        dst: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
+    # No patch step: WindowsConnectivity.dll stays pristine on purpose.
+    - extract:
+        file: $connectivity
+        dst: $GAMEDIR/connectivity
+    - execute:
+        description: Installing the in-app connectivity stack
+        # The bundle unpacks into a version-named directory; keep it around, its
+        # install.sh doubles as --verify and --restore for this prefix.
+        command: '"$GAMEDIR"/connectivity/mywhoosh-connectivity-*/install.sh "$GAMEDIR"'

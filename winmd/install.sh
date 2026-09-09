@@ -29,7 +29,11 @@ if [ "$1" = "--restore" ]; then
 fi
 
 for dll in $STUBS; do
-    [ -f "build/$dll" ] || ./build.sh
+    [ -f "build/$dll" ] && continue
+    # A release bundle ships build/ prepopulated and has no build.sh at all.
+    [ -x ./build.sh ] || { echo "missing build/$dll and no build.sh to make it" >&2; exit 1; }
+    ./build.sh
+    break
 done
 
 for dll in $STUBS; do

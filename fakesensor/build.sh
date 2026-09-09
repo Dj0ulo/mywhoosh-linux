@@ -11,7 +11,9 @@ command -v "$CC_WIN" >/dev/null || { echo "$CC_WIN not found (install mingw-w64)
 mkdir -p build
 $CC_WIN -shared -O2 -Wall -o build/fakebonjour.dll fakebonjour.c \
         -luuid -lole32 -loleaut32 -lws2_32
+# Opens the game's "is Bonjour Service running" gate without Apple's installer.
+$CC_WIN -O2 -Wall -o build/bonjourstub.exe bonjourstub.c -ladvapi32
 cc -shared -fPIC -O2 -Wall -o build/dotlocal_shim.so dotlocal_shim.c -ldl
 
-echo "built build/fakebonjour.dll and build/dotlocal_shim.so"
+echo "built build/fakebonjour.dll, build/bonjourstub.exe and build/dotlocal_shim.so"
 echo "install with:  WINEPREFIX=<prefix> ./install.sh"

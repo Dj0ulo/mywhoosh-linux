@@ -452,8 +452,10 @@ cc -shared -fPIC -o build/reuseaddr_shim.so reuseaddr_shim.c -ldl
 
 ### Reproducing the Bonjour setup
 
-Bonjour is not needed for `TestDircon` to show the gate closed, but it is needed
-to get past it. The game ships the installer; the service MSI is inside it:
+Nothing needs this any more — `../fakesensor/install.sh` opens the gate with its
+own stub service — but the measurements below were taken against Apple's, so
+here is how those prefixes were built. The game ships the installer; the service
+MSI is inside it:
 
 ```sh
 7z x -objx "<game>/Content/Libraries/Win64/Dircon/bonjoursdksetup.exe"
@@ -474,8 +476,11 @@ Note the wrapper's own `/quiet` install fails with MSI 1603 — it runs
   four lines. Anything written against these types has to stay off that path.
 - `GetNetworkState()` checks for a service named exactly `"Bonjour Service"` with
   status `Running`. That gate alone is trivially satisfiable in Wine without
-  Apple's code — but opening it just moves the failure to `WFTNP_Init`. The test
-  prefix still uses Apple's service for it; only the COM classes are replaced.
+  Apple's code — but opening it just moves the failure to `WFTNP_Init`, which is
+  why the prefixes here started out using Apple's service and replacing only the
+  COM classes. Now that `WFTNP_Init` is dealt with too,
+  `../fakesensor/bonjourstub.c` is that service: 60 lines that report
+  `SERVICE_RUNNING`, and no Apple code in the prefix at all.
 - `DirconSensor.TryToReconnect` pings the sensor's host, and raw sockets are
   denied under Wine (`IsTrainerAvailable - exception Access denied.`, in a tight
   loop). Nothing reconnects after a drop until that is dealt with outside the

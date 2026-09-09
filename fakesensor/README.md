@@ -33,7 +33,8 @@ GATT services over a loopback TCP socket in Wahoo's Direct Connect protocol.
 | `fakebonjour.c` | The COM server (both CLSIDs) plus the Dircon TCP server, one in-proc DLL |
 | `dotlocal_shim.c` | LD_PRELOAD shim resolving `*.local` to 127.0.0.1 — Wine resolves nothing else |
 | `build.sh` | mingw-w64 build of the DLL, host build of the shim |
-| `install.sh` | Points the two CLSIDs at the DLL inside one prefix (`--restore` undoes it) |
+| `bonjourstub.c` | A Windows service that exists only to be named `Bonjour Service`, the name the game gates on |
+| `install.sh` | Points the two CLSIDs at the DLL, installs that service, drops the shim in the prefix (`--restore` undoes it) |
 | `run.sh` | Runs `../dircon/TestDircon` against it |
 | `blebridge.py` | The same socket, backed by a **real** BLE trainer through BlueZ |
 
@@ -286,11 +287,14 @@ same sensor is also connected as `E_HeartRate`.
   `ERROR: ld.so: object '.../dotlocal_shim.so' ... wrong ELF class: ELFCLASS64`.
   The shim only matters in the 64-bit game process; building a 32-bit copy needs
   32-bit libc headers, which this machine does not have.
-- The prefix still needs a Windows service named exactly `Bonjour Service` in
-  state `Running`, because `GetNetworkState()` checks for it before anything else
-  happens. The test prefix has Apple's, installed from the game's own SDK
-  bundle — only its two COM classes are taken over. Satisfying that gate without
-  Apple's code is easy but not done here.
+- The prefix needs a Windows service named exactly `Bonjour Service` in state
+  `Running`, because `GetNetworkState()` checks for it before anything else
+  happens. `bonjourstub.c` is that service and nothing more: it reports
+  `SERVICE_RUNNING` and waits to be stopped. Nothing behind the gate is ever
+  asked of it — discovery is answered in-process by `fakebonjour.dll` — so no
+  part of Apple's Bonjour has to be installed. `install.sh` registers it with
+  `start= auto`, which is what brings it back after the `wineserver -k` between
+  launches, and leaves Apple's own service alone if a prefix already has one.
 - `blebridge.py` serves one client at a time and needs the device already
   paired-or-connectable by BlueZ; it does not pair for you. If the trainer is
   already connected to a phone or a head unit, BlueZ will not get it.
