@@ -41,6 +41,8 @@ if [ "$1" = "--restore" ]; then
     fi
     rm -f "$WINEPREFIX/dotlocal_shim.so"
     rm -f "$WINEPREFIX/drive_c/windows/system32/fakebonjour.dll"
+    # The sensor table the DLL republishes for ../exportshim on every load.
+    rm -f "$WINEPREFIX/drive_c/fakesensor-table"
     [ -f "$SAVED" ] || { echo "nothing saved in $SAVED" >&2; exit 1; }
     # Driven with reg, not regedit on the saved file: importing @="" leaves the
     # value pointing at us, and a prefix that never had Bonjour needs the key

@@ -57,6 +57,33 @@ class TestDircon
         Console.Out.Flush();
     }
 
+    // The unmanaged export, called exactly as the game calls it -- through the
+    // vtable-fixup slot ../exportshim/ rewrites, not through the managed method.
+    //
+    // Resolved by hand rather than with [DllImport]: mono resolves a DllImport
+    // when it compiles the method that calls it, and asking it to dlopen the
+    // game's own mixed-mode assembly as a native library takes the runtime
+    // down before any of this runs (measured -- a native crash in
+    // WD_StartScanning, well before the call).  GetProcAddress asks Wine
+    // instead, which is what the game does too.
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate int GetListFn(out IntPtr devices);
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr GetModuleHandleW(string name);
+
+    [DllImport("kernel32", CharSet = CharSet.Ansi, ExactSpelling = true, SetLastError = true)]
+    static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+    static GetListFn ScannedDevicesExport()
+    {
+        IntPtr m = GetModuleHandleW("WindowsConnectivity.dll");
+        if (m == IntPtr.Zero) return null;
+        IntPtr p = GetProcAddress(m, "WD_GetScannedDevicesList");
+        if (p == IntPtr.Zero) return null;
+        return (GetListFn)Marshal.GetDelegateForFunctionPointer(p, typeof(GetListFn));
+    }
+
     [STAThread]
     static void Main(string[] args)
     {
@@ -125,6 +152,10 @@ class TestDircon
         Try("WD_StartScanning", () => MyWhoosh.WD_StartScanning(EDeviceTypeEnum.E_PowerSource));
 
         DeviceInformationStruct? target = null;
+        // A second sensor, if one turned up: the game pairs each slot
+        // separately, so a heart-rate strap is its own device rather than
+        // another claim on the trainer.
+        DeviceInformationStruct? strap = null;
         for (int i = 1; i <= scanSeconds; i++)
         {
             Pump(1000);
@@ -135,12 +166,66 @@ class TestDircon
                 Say("SCAN", "t+" + i + "s: " + n + " device(s)");
                 if (found != null)
                     foreach (var d in found) Say("SCAN", "   " + Describe(d));
-                if (found != null && found.Length > 0 && target == null) target = found[0];
+                if (found != null && found.Length > 0 && target == null)
+                {
+                    target = found[0];
+                    foreach (var d in found)
+                        if (d.deviceName != target.Value.deviceName) { strap = d; break; }
+                }
             });
             if (target != null) break;
         }
 
+        // --- 5b. The heart-rate slot, the way the game asks for it -------------
+        // MyWhoosh polls the *export*, and the export is where
+        // ../exportshim/'s ScanRescue lives.  GetAllScannedDevices answers from
+        // the scan list for E_PowerSource and E_SecondaryPower only -- ask it
+        // for E_HeartRate and it walks paired sensors instead -- so without the
+        // rescue this comes back empty however many straps resolved.  Stop
+        // scanning first: StartScan clears the list and only re-browses when it
+        // is not already scanning, which is also what the game does when it
+        // moves from one slot to the next.
+        // Both slots, so the other half shows too: the shim hides a sensor whose
+        // capabilities cannot fill the slot being searched, which is the only
+        // thing standing between a strap and the trainer list.
+        int esize = Marshal.SizeOf(typeof(DeviceInformationStruct));
+        GetListFn poll = ScannedDevicesExport();
+        if (poll == null) Say("SLOT", "WD_GetScannedDevicesList is not exported");
+        foreach (EDeviceTypeEnum slot in
+                 new[] { EDeviceTypeEnum.E_HeartRate, EDeviceTypeEnum.E_PowerSource })
+        {
+            if (target == null || poll == null) break;
+            EDeviceTypeEnum s = slot;
+            // No WD_StopScanning first, on purpose: that is what the game does
+            // when it moves from one slot's search to the next, and it is the
+            // hard case.  StartScan clears the scan list and re-browses only
+            // when it is not already scanning, so the entries the last resolve
+            // wrote are gone and no new ones arrive -- which is what the shim's
+            // Announce puts back.
+            Try("WD_StartScanning(" + s + ")", () => MyWhoosh.WD_StartScanning(s));
+            for (int i = 1; i <= 8; i++)
+            {
+                Pump(1000);
+                int n = 0;
+                Try("WD_GetScannedDevicesList(export)", () => {
+                    IntPtr block;
+                    n = poll(out block);
+                    Say("SLOT", s + " t+" + i + "s: " + n + " device(s)");
+                    for (int k = 0; k < n; k++)
+                        Say("SLOT", "   " + Describe((DeviceInformationStruct)
+                            Marshal.PtrToStructure(new IntPtr(block.ToInt64() + (long)k * esize),
+                                                   typeof(DeviceInformationStruct))));
+                });
+                if (n > 0) break;
+            }
+        }
+
         // --- 6. Connect to whatever turned up, then read it --------------------
+        // Stop scanning first, as the game does when you pick a device out of
+        // the list: connecting while a browse is still cycling leaves the
+        // sensor's own connection racing the resolves and it never comes up.
+        Try("WD_StopScanning", () => MyWhoosh.WD_StopScanning());
+
         if (target == null)
         {
             Say("HARNESS", "nothing discovered -- stopping here");
@@ -152,9 +237,12 @@ class TestDircon
             Try("WD_ConnectToDevice(power)", () => MyWhoosh.WD_ConnectToDevice(ref d));
 
             // Slots are independent: WD_GetHeart reads the sensor paired as
-            // E_HeartRate, so the same device has to be claimed there too or the
-            // heart rate it is already reporting stays invisible.
-            DeviceInformationStruct hr = d;
+            // E_HeartRate, so a device has to be claimed there too or the heart
+            // rate it is already reporting stays invisible.  With two sensors
+            // advertised that is the second one -- which is the case that
+            // matters, since a strap is never the trainer.
+            DeviceInformationStruct hr = strap ?? d;
+            if (strap != null) Say("HARNESS", "heart rate from " + Describe(hr));
             hr.deviceType = EDeviceTypeEnum.E_HeartRate;
             Try("WD_ConnectToDevice(heart)", () => MyWhoosh.WD_ConnectToDevice(ref hr));
 

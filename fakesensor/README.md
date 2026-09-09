@@ -25,8 +25,8 @@ the multicast group under Wine, so nothing is ever discovered, and the fix is
 not to repair 2011 mDNSResponder but to **replace the two Bonjour coclasses**.
 That is what `fakebonjour.c` is. Registered under Bonjour's CLSIDs, it is loaded
 into the game's own process instead of `dnssdX.dll`, answers `Browse()` and
-`Resolve()` from a hard-coded description of one sensor, and serves that sensor's
-GATT services over a loopback TCP socket in Wahoo's Direct Connect protocol.
+`Resolve()` from its own small table of sensors, and serves each sensor's GATT
+services over a loopback TCP socket in Wahoo's Direct Connect protocol.
 
 | File | Role |
 |---|---|
@@ -36,7 +36,7 @@ GATT services over a loopback TCP socket in Wahoo's Direct Connect protocol.
 | `bonjourstub.c` | A Windows service that exists only to be named `Bonjour Service`, the name the game gates on |
 | `install.sh` | Points the two CLSIDs at the DLL, installs that service, drops the shim in the prefix (`--restore` undoes it) |
 | `run.sh` | Runs `../dircon/TestDircon` against it |
-| `blebridge.py` | The same socket, backed by a **real** BLE trainer through BlueZ |
+| `blebridge.py` | The same socket, backed by **real** BLE devices through BlueZ — a trainer, and a heart-rate strap beside it |
 
 ## Usage
 
@@ -51,16 +51,34 @@ WINEPREFIX=~/Games/dircon-test ./install.sh --restore    # give Bonjour its CLSI
 Knobs, all read from the environment by the DLL: `FAKESENSOR_NAME`,
 `FAKESENSOR_SERIAL` (digits only — the game parses it as a `UInt64` device id),
 `FAKESENSOR_MAC`, `FAKESENSOR_PORT`, `FAKESENSOR_POWER`, `FAKESENSOR_BPM`,
-`FAKESENSOR_ADDR` (what `*.local` resolves to), `FAKESENSOR_LOG`.
+`FAKESENSOR_CAPS`, `FAKESENSOR_HR`, `FAKESENSOR_ADDR` (what `*.local` resolves
+to), `FAKESENSOR_LOG`.
 
-The name, serial, MAC and port can also come from `C:\fakesensor-device`, a
-`key=value` file the DLL reads at load time. `blebridge.py` writes it, which is
-what keeps a real trainer's identity out of the game's environment; it wins over
-the variables above and implies `FAKESENSOR_EXTERNAL`.
+The DLL advertises a **table** of sensors, not one, because MyWhoosh pairs each
+slot separately: a heart-rate strap beside a trainer is a second service with
+its own name, host name, serial and Dircon port. `FAKESENSOR_CAPS` says which
+slots one sensor offers (`power,cadence,controllable,hr`), and
+`FAKESENSOR_HR=1` adds a second, heart-rate-only fake sensor on
+`FAKESENSOR_PORT + 1` — enough to exercise the heart-rate slot with no strap in
+the house:
 
-The sensor advertises Cycling Power (`0x1818` / `0x2a63`) and Heart Rate
-(`0x180d` / `0x2a37`), both notify-only, and pushes a measurement on each once a
-second.
+```sh
+FAKESENSOR_CAPS=power,cadence,controllable FAKESENSOR_HR=1 ...
+```
+
+The whole table can also come from `C:\fakesensor-device`, a `key=value` file
+the DLL reads at load time, one record per `name=` key. `blebridge.py` writes
+it, which is what keeps real hardware's identity out of the game's environment;
+it wins over the variables above and implies `FAKESENSOR_EXTERNAL`.
+
+However the table was configured, the DLL then writes it back out to
+`C:\fakesensor-table` for `../exportshim/` to read — one file for the shim to
+go on, so it can keep each sensor out of the slots it cannot fill.
+
+A fake sensor advertises Cycling Power (`0x1818` / `0x2a63`) when its
+capabilities include power, cadence or controllable, and Heart Rate (`0x180d` /
+`0x2a37`) when they include `hr`; both are notify-only, and it pushes a
+measurement on each once a second.
 
 ## Real hardware
 
@@ -94,9 +112,10 @@ work, because the trainer does send crank data.
 ```
 
 Nothing about the trainer is configured here. On connect the bridge writes the
-device's name, serial, address and port to `<prefix>/drive_c/fakesensor-device`,
-and the DLL picks all four up when the game loads it; the serial is derived from
-the address, and the host name the game resolves is derived from the name. The
+device's name, serial, address, port and capabilities to
+`<prefix>/drive_c/fakesensor-device`, and the DLL picks them up when the game
+loads it; the serial is derived from the address, and the host name the game
+resolves is derived from the name. The
 file's presence also stops the DLL binding the port itself, so it only
 advertises the one the bridge already serves — what `FAKESENSOR_EXTERNAL=1` did
 by hand. The bridge removes it on exit, and `--no-handshake` goes back to the
@@ -202,6 +221,106 @@ Two things this turned up, neither in this stack:
   empty. Auto-connect covers the case; a first-time pairing on a fresh serial is
   the path that needs checking.
 
+## Pairing a heart-rate strap
+
+The trainer is the first slot, not the only one. `--hr-mac` connects a strap as
+well, and its heart-rate service goes onto the *same* Dircon socket as the
+trainer's services:
+
+```sh
+./blebridge.py --mac FA:55:E5:BE:21:A5 --hr-mac D1:23:6E:0C:47:B8
+```
+
+```
+name=Tacx-Flux-06189   serial=1075253552437  port=36866  caps=power,cadence,controllable
+name=TICKR-5A2C        serial=1075253552437  port=36866  caps=hr
+```
+
+Two records, one serial, one port -- which looks wrong until you read what the
+game does with a second sensor.
+
+**MyWhoosh holds exactly one Direct Connect connection at a time.** Both
+`DirconSensor::Connect` and `WahooProgram::ServiceResolved` refuse to start
+another while `WahooProgram::sensorTasks` is non-empty, and say so
+(`ServiceResolved - connection task is already running`); the task they add to
+that list is `WFTNP_Connect`, which *is* the socket's read loop and so only ends
+when the connection does. A strap advertised on its own port is therefore
+browsed, resolved, listed, clicked and pairable -- and never dialled. Measured:
+the strap on 36867 got zero connections while the game showed `832823808 bpm`
+for it, a number that cannot come from the heart-rate path at all, since
+`SensorBase::GetHeart` clamps to `Constants::MAX_HEART_RATE_VALUE` (300) and
+returns 0 below 1.
+
+**The game's own answer for a device that fills several slots is the serial.**
+`PairDevice` parses the serial out of the offered device's `deviceUuid`, looks
+up the sensor already paired for `E_PowerSource`, and compares it with
+`SensorBase::identifier`. On a match it does not dial anything -- it hooks that
+same connected sensor into the new slot:
+
+```
+IL_029a: ldc.i4.4                            // deviceType == E_HeartRate
+IL_02a7: ldc.i4.1
+IL_02a8: stfld  CharacteristicsFeatures::heartConnectCallback
+IL_02b1: call   WahooProgram::SendConnectCallbackManual
+```
+
+So the strap is not a second sensor here. Its `0x180D` joins the trainer's
+services on one endpoint under the trainer's serial, and each device is still
+advertised under its own name -- so the trainer's slots list the trainer and the
+heart-rate slot lists the strap, with one connection behind both. The game
+subscribes to `0x2A37` itself, without being asked and before any pairing, as
+soon as it walks the service list:
+
+```
+bridge: notify 00002ad2 on rc=0     <- indoor bike data
+bridge: notify 00002a37 on rc=0     <- heart rate, on the trainer's connection
+bridge: write 00002ad9 <- 01        <- and still driving resistance
+```
+
+Two more things had to be added for the strap to be reachable at all, and both
+are on our side of the line -- no game file is touched:
+
+- **The game will not offer a network sensor for the heart-rate slot.**
+  `GetAllScannedDevices` reports `scannedList` only for `E_PowerSource` and
+  `E_SecondaryPower`; asked for `E_HeartRate` it walks *paired* sensors instead,
+  so a strap is discovered, resolved, listed internally and then never shown. On
+  Windows that is no gap, because straps arrive over BLE — the one path that is
+  inert here. `../exportshim/`'s `ScanRescue` asks the game for the scan list
+  under a slot it does answer for, relabels each entry as the slot actually
+  requested, and appends it to the paired sensors the game meant to offer. The
+  entries are the game's own, keyed on host names it resolved itself.
+- **Capabilities have to be filtered, because the game cannot tell yet.** Before
+  it connects, MyWhoosh knows nothing about a sensor beyond its name — so a
+  power-only trainer would sit in the heart-rate list and a strap in the trainer
+  list. The shim reads the same handshake file the DLL does and hides a sensor
+  from a slot its `caps=` cannot fill. `blebridge.py` derives those from the
+  GATT tree it found: power from `0x2A63`/`0x2AD2`, cadence from those or
+  `0x2A5B`, controllable from the FTMS control point `0x2AD9`, `hr` from
+  `0x2A37`, and attributes each to the device that actually owns the
+  characteristic on the wire.
+
+`FAKESENSOR_HR=1` walks the discovery and pairing path with a made-up strap, for
+testing without hardware -- two fake sensors and `./run.sh`, the probe polling
+the export the way the game's UI does:
+
+```
+[fakebonjour] loaded: name="FakeTrainer" port=36866 caps=power,cadence,controllable
+[fakebonjour] loaded: name="FakeHRM"     port=36867 caps=hr
+SCAN   t+5s: 2 device(s)
+SLOT   E_HeartRate   t+1s: 1 device(s)   "FakeHRM"      type=E_HeartRate
+SLOT   E_PowerSource t+1s: 1 device(s)   "FakeTrainer"  type=E_PowerSource
+CONN   E_PowerSource E_Success "FakeTrainer"
+CONN   E_HeartRate   E_Success "FakeHRM"
+READ   t+2s power=152W cadence=-1 speed=-1 hr=76 connected=True
+READ   t+3s power=154W cadence=-1 speed=-1 hr=77 connected=True
+```
+
+That covers the scan list, the per-slot filtering and both getters reading one
+sensor each. It does *not* reproduce the game's one-connection rule: the probe
+dials both ports itself, which is exactly what the game will not do -- so a
+strap that passes here can still arrive with no data path in game, and the
+bridge's shared endpoint is what settles that.
+
 ## It also starts the export shim
 
 `fakebonjour.c` does one thing that has nothing to do with Bonjour: on its first
@@ -280,8 +399,19 @@ back empty however many services resolved. Slots are independent afterwards, so
 one device has to be claimed once per slot — `WD_GetHeart()` stays `-1` until the
 same sensor is also connected as `E_HeartRate`.
 
+That last point is what a strap runs into: search the heart-rate slot and the
+game walks its *paired* sensors instead of the scan list, so a strap that
+announced itself over Direct Connect is browsed, resolved, written into
+`scannedList` and then never offered. `../exportshim/`'s `ScanRescue` is where
+that is answered — it asks the game for the scan list under the slot the game
+does answer for, and relabels the result. See "Pairing a heart-rate strap"
+above.
+
 ## Known rough edges
 
+- Nothing filters the scan list except the shim, so without
+  `../exportshim/` installed every advertised sensor is offered for every slot
+  — and the heart-rate slot lists nothing at all.
 - **Reconnection cannot work under Wine as-is.** After a disconnect,
   `DirconSensor.TryToReconnect` polls `IsTrainerAvailable`, which pings the host;
   raw sockets are denied, so it logs `Access denied.` in a tight loop forever.

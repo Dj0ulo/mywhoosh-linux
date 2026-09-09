@@ -134,6 +134,99 @@ remove even that, but only by betting on the game never freeing — and if the
 bet is wrong it is a use-after-free rather than a slow leak, so it is not
 taken.
 
+## The slots the game will not fill from the network
+
+One thing here is not marshalling. `GetAllScannedDevices` reports `scannedList`
+-- the Dircon sensors Bonjour found and we resolved -- only when
+`scanDeviceType` is `E_PowerSource` (1) or `E_SecondaryPower` (8), and only when
+`scanMechanism` is 0. Ask it for `E_HeartRate` (4) and it walks `pairedList`
+instead:
+
+```
+IL_0011: ldfld    scanDeviceType
+IL_0016: brfalse  IL_0223                 // none: return the empty list
+IL_001c: ldfld    scanMechanism
+IL_0021: brtrue   IL_0223                 // BLE scan: nothing from here
+IL_0027: ldfld    pairedList              // 2, 3 and 4 are answered from here
+...
+IL_0154: ldc.i4.1
+IL_0155: beq.s    IL_0163                 // 1 or 8, and only then
+IL_0164: ldfld    scannedList             //   the scan list
+```
+
+So a heart-rate strap that announced itself over Direct Connect is browsed,
+resolved, written into `scannedList` and then never offered: the branch that
+would offer it does not exist. On Windows that is no gap -- straps arrive over
+BLE, which is the one path that is inert here (`../winmd/` stubs WinRT out).
+
+`ScanRescue` answers it by asking twice. Once as the game stands, for the paired
+sensors it does mean to offer; once with `scanDeviceType` forced to
+`E_PowerSource`, for the scan list. The second answer's structs say
+`deviceType = 1` because the method copies the very field it was asked about --
+
+```
+IL_01c1: ldfld    scanDeviceType
+IL_01c6: stfld    DeviceInformationStruct::deviceType
+```
+
+-- so each is rewritten to the slot actually requested, which is all
+`ConnectDevice` and `PairDevice` read it for. Nothing is fabricated: every entry
+comes out of the game's own `scannedList`, keyed on a host name it resolved
+itself, and the second call is the one that clears the list, exactly as an
+unrescued slot's single call does.
+
+Three details that matter:
+
+- **A sensor already offered from `pairedList` is not appended twice.** A
+  combined trainer that the game lists for the heart-rate slot by itself would
+  otherwise arrive again under a second identifier.
+- **The forced field is restored in a `finally`.** It is an instance field on a
+  manager other threads read, so it is set for the length of one call and no
+  longer.
+- **Slots are filtered by capability.** Before connecting, the game knows
+  nothing about a sensor but its name, so a power-only trainer would sit in the
+  heart-rate list and a strap in the trainer list. `DeviceCaps` reads
+  `C:\fakesensor-table`, which `../fakesensor/fakebonjour.c` writes at load
+  time from whatever it ended up advertising -- so there is one file, whether
+  the sensors came from `blebridge.py`'s handshake or from the environment --
+  and hides a sensor from a slot its `caps=` cannot fill. No file, or a name
+  not in it, means no filtering.
+
+Measured against two fake sensors, one power-only and one heart-rate-only, with
+`../dircon/TestDircon` calling the export the way the game does:
+
+```
+[exportshim] WD_GetScannedDevicesList: offering "FakeTrainer" for device type 4
+[exportshim] WD_GetScannedDevicesList: offering "FakeHRM" for device type 4
+[exportshim] WD_GetScannedDevicesList: "FakeTrainer" cannot serve device type 4, hiding it
+SLOT   E_HeartRate t+1s: 1 device(s)
+SLOT      "FakeHRM" ... type=E_HeartRate
+[exportshim] WD_GetScannedDevicesList: "FakeHRM" cannot serve device type 1, hiding it
+SLOT   E_PowerSource t+1s: 1 device(s)
+SLOT      "FakeTrainer" ... type=E_PowerSource
+READ   t+2s power=152W cadence=-1 speed=-1 hr=76 connected=True
+```
+
+Each slot lists exactly the sensor that can fill it, and the two are read
+independently: `WD_GetPower()` from the trainer, `WD_GetHeart()` from the strap.
+Without the rescue the heart-rate poll returns 0 devices. In the real game:
+
+```
+[exportshim] WD_GetScannedDevicesList: announcing "Tacx-Flux-06189" at Tacx-Flux-06189.local.:36866
+[exportshim] WD_GetScannedDevicesList: offering "Powerbeats-HR" for device type 4
+[exportshim] WD_GetScannedDevicesList: "Tacx-Flux-06189" cannot serve device type 4, hiding it
+[exportshim] WD_GetScannedDevicesList: scanDeviceType=4 scanMechanism=0 -> 0 from the game, 1 after us
+```
+
+Getting *listed* is all this buys, though, and it is worth being clear about the
+line: the probe above connects to each sensor on its own port, which is
+something the game itself will not do -- it holds one Direct Connect connection
+at a time and fills a second slot by matching serials against the sensor it
+already has. So the strap the shim reveals has to be reachable on the trainer's
+own connection, under the trainer's serial, or pairing it yields a slot with no
+data path behind it. `../fakesensor/README.md`, "Pairing a heart-rate strap",
+has the IL and the measurements.
+
 ## How it gets started
 
 It needs our managed code running inside the game process, after
@@ -179,16 +272,16 @@ driven by the game rather than by a probe. Where the previous run had
 `FATAL UNHANDLED EXCEPTION` there is now nothing at all.
 
 Confirmed in the UI on that same run: the Device Connection screen lists
-`FakeTrainer` and shows its watts updating. Real hardware does not appear, which
-is expected rather than a gap here -- `../fakesensor/` serves one hard-coded
-sensor, and reaching an actual trainer is `blebridge.py`'s job (BLE itself stays
-inert, since WinRT is what `../winmd/` stubs out).
+`FakeTrainer` and shows its watts updating. Reaching actual hardware is
+`../fakesensor/blebridge.py`'s job -- BLE itself stays inert, since WinRT is
+what `../winmd/` stubs out -- and the heart-rate slot needs the rescue below as
+well as the bridge.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `ExportShim.cs` | The shim: finds the slots, replaces them, marshals the arrays |
+| `ExportShim.cs` | The shim: finds the slots, replaces them, marshals the arrays, and rescues the scan list for the slots the game will not fill from the network |
 | `build.sh` | `mcs` → `build/MyWhooshShim.dll` |
 | `install.sh` | Copies it into the prefix's wine-mono tree (`--restore` removes it) |
 

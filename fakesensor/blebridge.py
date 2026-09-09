@@ -21,16 +21,27 @@ device entirely; the bridge waits for it to advertise again, reconnects and
 restores the client's subscriptions, leaving the Dircon socket up so the game
 never sees its device go away.
 
+A heart-rate strap joins the trainer on the same socket: --hr-mac connects it
+too and its heart-rate service goes onto the one Dircon endpoint.  It has to be
+that way round -- the game holds one Direct Connect connection at a time, and
+pairs a second slot by matching serials against the sensor it already has (see
+Bridge).  Each device is still advertised under its own name, so the trainer's
+slots list the trainer and the heart-rate slot lists the strap; behind both is
+the one connection.  MyWhoosh will also not offer a Direct Connect sensor for
+the heart-rate slot by itself -- see ../exportshim/ExportShim.cs, ScanRescue --
+so the shim has to be installed for the strap to appear.
+
 Usage:
     ./blebridge.py                      # pick the first fitness device seen
     ./blebridge.py --mac FA:55:E5:BE:21:A5 --port 36866
+    ./blebridge.py --mac FA:55:E5:BE:21:A5 --hr-mac D1:23:6E:0C:47:B8
     ./blebridge.py --list               # scan and print candidates, then exit
 
-Start this before the game: on connect it writes the trainer's name, serial,
-address and port into <prefix>/drive_c/fakesensor-device, which fakebonjour
-reads when the game loads it, so nothing has to be configured per trainer.  The
-file also tells the DLL not to bind the Dircon port itself, and is removed on
-exit.  Pass --prefix if the prefix cannot be guessed, or --no-handshake to go
+Start this before the game: on connect it writes each device's name, serial,
+address, port and capabilities into <prefix>/drive_c/fakesensor-device, which
+fakebonjour reads when the game loads it, so nothing has to be configured per
+trainer.  The file also tells the DLL not to bind the Dircon ports itself, tells
+the shim which sensor can fill which pairing slot, and is removed on exit.  Pass --prefix if the prefix cannot be guessed, or --no-handshake to go
 back to advertising through FAKESENSOR_NAME/SERIAL/PORT in the game's
 environment (printed on startup in that case).
 """
@@ -127,6 +138,17 @@ FITNESS_SERVICES = {
     u16(0x180F): "Battery",
 }
 
+# The characteristics a pairing slot actually needs.  MyWhoosh decides what a
+# sensor can do from the GATT tree it finds, so reporting the same thing to the
+# shim (through the handshake) is what keeps a strap out of the trainer list and
+# a power-only trainer out of the heart-rate list -- neither of which the game
+# can tell apart before it has connected.
+CH_POWER_MEASUREMENT = u16(0x2A63)
+CH_INDOOR_BIKE_DATA = u16(0x2AD2)
+CH_CSC_MEASUREMENT = u16(0x2A5B)
+CH_FTMS_CONTROL = u16(0x2AD9)
+CH_HEART_RATE = u16(0x2A37)
+
 # Dircon's own property bits, which are not GATT's.
 DP_READ, DP_WRITE, DP_NOTIFY = 1, 2, 4
 
@@ -191,17 +213,27 @@ def find_prefix():
     return None
 
 
-def write_handshake(prefix, name, serial, mac, port):
-    """Hand the DLL this trainer's identity, and take it back on the way out."""
+def write_handshake(prefix, devices):
+    """Hand the DLL these sensors' identities, and take them back on the way out.
+
+    One `name=' record per offered sensor, in order; a record's `caps=' is what
+    the export shim filters the game's scan list on.  Several records can share
+    a port and a serial -- that is how one connection is offered under each of
+    its devices' names.
+    """
     path = os.path.join(prefix, "drive_c", HANDSHAKE)
-    body = "name=%s\nserial=%d\nmac=%s\nport=%d\n" % (name, serial, mac, port)
+    body = "".join("name=%s\nserial=%d\nmac=%s\nport=%d\ncaps=%s\n"
+                   % (d["name"], d["serial"], d["mac"], d["port"], ",".join(d["caps"]))
+                   for d in devices)
     try:
         with open(path, "w") as f:
             f.write(body)
     except OSError as e:
         log("cannot write %s: %s", path, e)
         return
-    log("handshake %s: name=%s serial=%d port=%d", path, name, serial, port)
+    for d in devices:
+        log("handshake %s: name=%s serial=%d port=%d caps=%s",
+            path, d["name"], d["serial"], d["port"], ",".join(d["caps"]) or "none")
 
     def clean():
         try:
@@ -209,6 +241,25 @@ def write_handshake(prefix, name, serial, mac, port):
         except OSError:
             pass
     atexit.register(clean)
+
+
+def caps_for(chars):
+    """Which MyWhoosh pairing slots a set of characteristics can fill, by name.
+
+    Cadence is claimed for the power and indoor-bike characteristics as well as
+    the CSC one, because all three can carry crank data and the game works out
+    which at runtime, from the first notification's flags.
+    """
+    caps = []
+    if chars & {CH_POWER_MEASUREMENT, CH_INDOOR_BIKE_DATA}:
+        caps.append("power")
+    if chars & {CH_POWER_MEASUREMENT, CH_INDOOR_BIKE_DATA, CH_CSC_MEASUREMENT}:
+        caps.append("cadence")
+    if CH_FTMS_CONTROL in chars:
+        caps.append("controllable")
+    if CH_HEART_RATE in chars:
+        caps.append("hr")
+    return caps
 
 
 def dircon_props(flags):
@@ -222,21 +273,22 @@ def dircon_props(flags):
     return p
 
 
-class Bridge:
-    def __init__(self, bus, adapter, mac, port, expose_all):
+class Peer:
+    """One real BLE device, and the part of the Dircon service list it owns."""
+
+    def __init__(self, bus, adapter, mac, expose_all):
         self.bus = bus
         self.adapter_path = "/org/bluez/%s" % adapter
         self.mac = mac.upper() if mac else None
-        self.port = port
         self.expose_all = expose_all
+        self.name = None
         self.dev_path = None
         self.services = {}        # service uuid -> [(char uuid, props, char path)]
         self.by_char = {}         # char uuid -> char path
-        self.notifying = set()    # char uuids the client subscribed to
         self.traced = set()       # char uuids already logged once
         self.traced_at = {}       # ... and when they were last logged
-        self.client = None
-        self.buf = b""
+        self.bridge = None        # the Dircon endpoint serving us
+        self.watching = False     # PropertiesChanged receiver installed
         self.reconnecting = False
         self.om = dbus.Interface(bus.get_object(BLUEZ, "/"), OM_IFACE)
 
@@ -271,7 +323,7 @@ class Bridge:
 
         def found():
             if want_mac:
-                if self.device_path(want_mac) in self.objects():
+                if self.advertising(self.device_path(want_mac)):
                     loop.quit()
                     return False
             elif self.candidates():
@@ -290,15 +342,29 @@ class Bridge:
     def device_path(self, mac):
         return "%s/dev_%s" % (self.adapter_path, mac.replace(":", "_"))
 
+    def advertising(self, path):
+        """Has an advertisement from this device actually arrived?
+
+        BlueZ keeps an object for any device it has seen before, so being in
+        the tree says nothing about being on the air -- and a trainer asleep in
+        the tree costs a 30s Connect() timeout.  RSSI is set from a real
+        advertisement received during discovery, and dropped when discovery
+        stops, which is the distinction we need.
+        """
+        d = self.objects().get(path, {}).get(DEVICE_IFACE, {})
+        return "RSSI" in d or bool(d.get("Connected"))
+
     def connect(self):
         """Find the device, connect, and wait for its GATT tree."""
         if self.mac:
             self.dev_path = self.device_path(self.mac)
-            if self.dev_path not in self.objects():
-                log("scanning for %s", self.mac)
+            if not self.advertising(self.dev_path):
+                log("waiting for %s to advertise", self.mac)
                 self.scan(30, self.mac)
-            if self.dev_path not in self.objects():
-                raise SystemExit("no advertisement from %s" % self.mac)
+            if not self.advertising(self.dev_path):
+                raise SystemExit(
+                    "no advertisement from %s in 30s -- a trainer asleep looks "
+                    "exactly like this, so turn the cranks and try again" % self.mac)
         else:
             if not self.candidates():
                 log("scanning for a fitness device")
@@ -340,9 +406,9 @@ class Bridge:
             raise SystemExit("connected to %s but its services never resolved" % self.mac)
 
         self.load_gatt()
-        name = str(props.Get(DEVICE_IFACE, "Alias"))
-        log("%s connected: %d service(s) exposed", name, len(self.services))
-        return name
+        self.name = str(props.Get(DEVICE_IFACE, "Alias"))
+        log("%s connected: %d service(s) exposed", self.name, len(self.services))
+        return self.name
 
     def load_gatt(self):
         objs = self.objects()
@@ -377,12 +443,16 @@ class Bridge:
             for cu, p, _ in chars:
                 log("    %s props=%d", cu[:8], p)
 
-        self.bus.add_signal_receiver(
-            self.on_char_props,
-            dbus_interface=PROPS_IFACE,
-            signal_name="PropertiesChanged",
-            path_keyword="path",
-        )
+        # Once only: load_gatt runs again on every reconnect, and a second
+        # receiver would deliver every notification twice.
+        if not self.watching:
+            self.bus.add_signal_receiver(
+                self.on_char_props,
+                dbus_interface=PROPS_IFACE,
+                signal_name="PropertiesChanged",
+                path_keyword="path",
+            )
+            self.watching = True
 
     def char_iface(self, cu):
         return dbus.Interface(self.bus.get_object(BLUEZ, self.by_char[cu]), CHAR_IFACE)
@@ -395,13 +465,11 @@ class Bridge:
                 break
         else:
             return
-        if cu not in self.notifying:
+        if cu not in self.bridge.notifying:
             return
         value = bytes(bytearray(changed["Value"]))
         self.trace_notification(cu, value)
-        if not self.client:
-            return
-        self.send(MSG_NOTIFICATION, 0, RC_OK, uuid.UUID(cu).bytes + value)
+        self.bridge.send(MSG_NOTIFICATION, 0, RC_OK, uuid.UUID(cu).bytes + value)
 
     def trace_notification(self, cu, value):
         """Log the first notification of each characteristic, and then keep
@@ -443,23 +511,29 @@ class Bridge:
             return True
         self.reconnecting = True
         try:
-            log("trainer is gone (asleep or out of range); waiting for it")
+            log("%s is gone (asleep or out of range); waiting for it",
+                self.name or self.mac)
             self.services, self.by_char = {}, {}
             try:
                 self.connect()
             except (SystemExit, dbus.DBusException) as e:
                 log("  not back yet (%s); will keep trying", e)
                 return True
+            # The characteristic paths are new, so the merged list the client
+            # reads and writes through has to point at them.
+            self.bridge.remerge()
 
             resubscribed = 0
-            for cu in sorted(self.notifying):
+            for cu in sorted(self.bridge.notifying):
+                if cu not in self.by_char:
+                    continue          # another peer's subscription
                 try:
                     self.char_iface(cu).StartNotify()
                     resubscribed += 1
                 except dbus.DBusException as e:
                     log("  could not resubscribe %s: %s", cu[:8], e.get_dbus_name())
             log("reconnected; %d subscription(s) restored, client %s",
-                resubscribed, "still attached" if self.client else "not attached")
+                resubscribed, "still attached" if self.bridge.client else "not attached")
             # The flags are read once per notification stream, so let them be
             # logged again for the new one.
             self.traced.clear()
@@ -467,6 +541,73 @@ class Bridge:
             return True
         finally:
             self.reconnecting = False
+
+
+class Bridge:
+    """One Dircon endpoint, serving one or more real devices as a single sensor.
+
+    MyWhoosh runs exactly one Direct Connect connection at a time.  Both
+    `DirconSensor::Connect` and `WahooProgram::ServiceResolved` refuse to start
+    another while `WahooProgram::sensorTasks` is non-empty ("connection task is
+    already running"), and the task they add to it is the socket's own read
+    loop, which ends only when the connection does.  So a strap advertised on a
+    second port is discovered, resolved, listed, pairable -- and never
+    connected, which is what showed as a nonsense heart rate in game.
+
+    The game's own answer for a device that fills several slots is the serial:
+    `PairDevice` parses the serial out of the offered device and compares it
+    with the sensor already paired for E_PowerSource; on a match it hooks that
+    same connected sensor into the new slot instead of dialling anything
+    (`features.heartConnectCallback = true`, `SendConnectCallbackManual(4,
+    sensor)`).  That is what this class is for: every peer's services go onto
+    one socket under one name and one serial, and the game pairs the one sensor
+    into every slot its characteristics can fill.
+    """
+
+    def __init__(self, bus, port):
+        self.bus = bus
+        self.port = port
+        self.peers = []
+        self.services = {}        # service uuid -> [(char uuid, props, path)]
+        self.by_char = {}         # char uuid -> the peer that has it
+        self.notifying = set()    # char uuids the client subscribed to
+        self.client = None
+        self.buf = b""
+
+    def add(self, peer):
+        """Connect a device and put its services on our wire."""
+        peer.bridge = self
+        peer.connect()
+        self.peers.append(peer)
+        self.remerge()
+        return peer
+
+    def remerge(self):
+        """Rebuild the merged view after any peer's GATT tree changes.
+
+        First peer to offer a service keeps it: two devices with the same
+        service UUID cannot both be answered under one Dircon identity, and the
+        trainer is added first for that reason.
+        """
+        self.services, self.by_char = {}, {}
+        for peer in self.peers:
+            for su, chars in peer.services.items():
+                if su in self.services:
+                    log("%s also has %s %s; leaving its copy off the wire",
+                        peer.name or peer.mac, su[:8], FITNESS_SERVICES.get(su, ""))
+                    continue
+                self.services[su] = chars
+                for cu, _props, _path in chars:
+                    self.by_char[cu] = peer
+
+    def caps(self, peer=None):
+        """Every pairing slot this sensor can fill; for one peer, only the ones
+        its own characteristics -- the ones that made it onto the wire -- fill."""
+        return caps_for({cu for cu, owner in self.by_char.items()
+                         if peer is None or owner is peer})
+
+    def char_iface(self, cu):
+        return self.by_char[cu].char_iface(cu)
 
     # --------------------------------------------------------------- Dircon
 
@@ -633,6 +774,8 @@ def main():
     ap.add_argument("--mac", help="device address; default is the first fitness device seen")
     ap.add_argument("--adapter", default="hci0")
     ap.add_argument("--port", type=int, default=36866, help="Dircon TCP port (default 36866)")
+    ap.add_argument("--hr-mac", help="a heart-rate strap to serve alongside the trainer, "
+                    "on the same socket, so the game can pair it too")
     ap.add_argument("--host", default="127.0.0.1", help="address to listen on")
     ap.add_argument("--all", action="store_true", dest="expose_all",
                     help="expose every GATT service, not just the fitness ones")
@@ -646,32 +789,54 @@ def main():
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    b = Bridge(bus, args.adapter, args.mac, args.port, args.expose_all)
+    trainer = Peer(bus, args.adapter, args.mac, args.expose_all)
 
     if args.list:
-        b.scan(15, None)
-        for path, addr, alias, uuids in b.candidates():
+        trainer.scan(15, None)
+        for path, addr, alias, uuids in trainer.candidates():
             known = [FITNESS_SERVICES[u] for u in uuids if u in FITNESS_SERVICES]
             print("%s  %-24s %s" % (addr, alias, ", ".join(known)))
         return
 
-    name = b.connect()
+    b = Bridge(bus, args.port)
+    b.add(trainer)
+    if args.hr_mac:
+        # Not a second sensor: the strap's heart-rate service joins the
+        # trainer's on this one socket, because the game will only ever hold
+        # one Direct Connect connection (see Bridge).
+        b.add(Peer(bus, args.adapter, args.hr_mac, args.expose_all))
     b.listen(args.host)
-    GLib.timeout_add_seconds(5, b.watchdog)
+    for peer in b.peers:
+        GLib.timeout_add_seconds(5, peer.watchdog)
+
     # The serial is the device's identity as far as MyWhoosh is concerned: it
     # keys its saved pairing on it and then shows the *stored* name, so leaving
-    # fakebonjour's default serial in place makes a real trainer come up under
-    # whatever name the last sensor on that serial had -- and makes the game
-    # treat it as already known, which keeps it out of the scan results.
-    # Derive one from the address so every trainer is its own device.
-    serial = int(b.mac.replace(":", ""), 16)
-    name = name.replace(" ", "-")
+    # fakebonjour's default serial in place makes a real sensor come up under
+    # whatever name the last one on that serial had -- and makes the game treat
+    # it as already known, which keeps it out of the scan results.  Derive one
+    # from the trainer's address.  It is also what the game matches a second
+    # slot's pairing against, so every peer here has to answer to this one.
+    #
+    # One endpoint, but one name each in the scan list: what the game matches a
+    # second slot's pairing on is that serial, not the name, so each peer can
+    # be offered under its own name at the trainer's serial and port and the
+    # heart-rate slot shows the strap instead of the trainer.  Pairing it hooks
+    # the sensor already connected for the trainer into the new slot, which is
+    # the one thing the game will do here.
+    serial = int(trainer.mac.replace(":", ""), 16)
+    devices = [{"name": p.name.replace(" ", "-"), "serial": serial,
+                "mac": p.mac, "port": b.port, "caps": b.caps(p)}
+               for p in b.peers if b.caps(p)]
+    if len(devices) > 1:
+        log("serving one sensor on port %d, offered as %s", b.port,
+            " and ".join("%s (%s)" % (d["name"], ",".join(d["caps"])) for d in devices))
+
     prefix = None if args.no_handshake else (args.prefix or find_prefix())
     if prefix:
-        write_handshake(prefix, name, serial, b.mac, args.port)
+        write_handshake(prefix, devices)
     else:
         log("advertise this as: FAKESENSOR_NAME=%r FAKESENSOR_SERIAL=%d FAKESENSOR_PORT=%d",
-            name, serial, args.port)
+            devices[0]["name"], devices[0]["serial"], devices[0]["port"])
     try:
         GLib.MainLoop().run()
     except KeyboardInterrupt:

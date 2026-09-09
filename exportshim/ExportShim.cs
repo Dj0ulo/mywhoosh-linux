@@ -65,6 +65,7 @@
 // game process by the time any of this is polled.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -179,7 +180,7 @@ namespace MyWhoosh
             IntPtr slot = DecodeStub(stub, name);
             if (slot == IntPtr.Zero) return false;
 
-            var poller = new Poller(name, mi, elem);
+            var poller = new Poller(name, mi, elem, ScanRescue.For(name, game, elem));
             GetListFn fn = poller.Call;
             IntPtr thunk = Marshal.GetFunctionPointerForDelegate(fn);
             Rooted.Add(fn);
@@ -219,18 +220,370 @@ namespace MyWhoosh
 
         /// One export: calls the managed method directly, then marshals the
         /// array out by hand the way the CLR would.
+        /// Call one of the four managed pollers, boxing each element so that a
+        /// caller can edit a struct on its way out.
+        static List<object> Invoke(string name, MethodInfo method)
+        {
+            var args = new object[] { null };
+            object ret = method.Invoke(null, args);
+            var list = new List<object>();
+            Array a = args[0] as Array;
+            if (a != null) foreach (object o in a) list.Add(o);
+            if (ret is int && (int)ret != list.Count)
+                Log(name + ": returned " + (int)ret + " but the array holds " + list.Count);
+            return list;
+        }
+
+        /// The heart-rate slot, and every other slot the game will not fill
+        /// from the network.
+        ///
+        /// `GetAllScannedDevices` reports `scannedList` -- the sensors Bonjour
+        /// found and we resolved -- only when `scanDeviceType` is
+        /// `E_PowerSource` (1) or `E_SecondaryPower` (8), and only when
+        /// `scanMechanism` is 0.  Ask it for `E_HeartRate` (4) and it walks
+        /// `pairedList` instead: a strap that announced itself over Direct
+        /// Connect is browsed, resolved, written into `scannedList` and then
+        /// never offered, because the branch that would offer it does not
+        /// exist.  On Windows that is no gap -- straps arrive over BLE, which
+        /// is the one path that is inert here (`../winmd/` stubs WinRT out).
+        ///
+        /// So for a slot the game answers only from `pairedList`, ask twice:
+        /// once as it stands, for the paired sensors it does mean to offer,
+        /// and once with `scanDeviceType` forced to `E_PowerSource`, for the
+        /// scan list.  The second answer's structs say `deviceType = 1`,
+        /// because the method copies the very field it was asked about
+        /// (`IL_01c1`), so each is rewritten to the slot actually requested --
+        /// which is all `ConnectDevice` and `PairDevice` read it for.  The
+        /// entries themselves are the game's own, keyed on a host name it
+        /// resolved itself; nothing is fabricated here.
+        ///
+        /// The second call is also the one that clears `scannedList`, exactly
+        /// as the unrescued slots do, so the list still empties once per poll.
+        internal sealed class ScanRescue
+        {
+            const string Export = "WD_GetScannedDevicesList";
+
+            // ConnectivityConstants.EDeviceTypeEnum
+            const int E_PowerSource = 1, E_Controllable = 2, E_Cadence = 3,
+                      E_HeartRate = 4, E_SecondaryPower = 8;
+
+            readonly FieldInfo managerField;   // FunctionsManager.MyWhoosh::dirconManager
+            readonly FieldInfo scanType;       // WahooProgram::scanDeviceType
+            readonly FieldInfo scanMech;       // WahooProgram::scanMechanism
+            readonly FieldInfo devType;        // DeviceInformationStruct::deviceType
+            readonly FieldInfo devName;        // DeviceInformationStruct::deviceName
+            readonly FieldInfo scannedList;    // WahooProgram::scannedList
+            bool complained;
+
+            /// Null for every export but the scanned-device poller, and null if
+            /// this MyWhoosh does not look the way the comment above describes,
+            /// in which case the poller keeps its plain behaviour.
+            internal static ScanRescue For(string name, Type game, Type elem)
+            {
+                if (name != Export) return null;
+                try
+                {
+                    var r = new ScanRescue(game, elem);
+                    Log(Export + ": rescuing the slots the game fills only from pairedList");
+                    return r;
+                }
+                catch (Exception e)
+                {
+                    Log(Export + ": no slot rescue (" + e.Message + ")");
+                    return null;
+                }
+            }
+
+            ScanRescue(Type game, Type elem)
+            {
+                managerField = Field(game, "dirconManager",
+                                     BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                var prog = managerField.FieldType;
+                scanType = Field(prog, "scanDeviceType", Instance);
+                scanMech = Field(prog, "scanMechanism", Instance);
+                scannedList = Field(prog, "scannedList", Instance);
+                devType = Field(elem, "deviceType", Instance);
+                devName = Field(elem, "deviceName", Instance);
+            }
+
+            const BindingFlags Instance =
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            static FieldInfo Field(Type t, string name, BindingFlags flags)
+            {
+                FieldInfo f = t.GetField(name, flags);
+                if (f == null) throw new MissingFieldException(t.FullName + "::" + name);
+                return f;
+            }
+
+            // Every distinct scan the game has asked for, logged once each.  What
+            // slot it searches with which mechanism is the whole question when a
+            // list comes back empty, and it is not visible from anywhere else.
+            readonly List<string> asked = new List<string>();
+
+            // ... and every sensor already offered for a slot, likewise.
+            readonly List<string> offered = new List<string>();
+
+            internal List<object> Poll(MethodInfo method)
+            {
+                object mgr = managerField.GetValue(null);
+                if (mgr == null)
+                {
+                    if (!asked.Contains("null")) { asked.Add("null"); Log(Export + ": dirconManager is null"); }
+                    return Invoke(Export, method);
+                }
+
+                int want = Convert.ToInt32(scanType.GetValue(mgr));
+                int mech = Convert.ToInt32(scanMech.GetValue(mgr));
+                bool fromNetwork = want == E_PowerSource || want == E_SecondaryPower;
+
+                // Before reading the list, not only on the rescued slots: the
+                // trainer's own search is cleared the same way when you come
+                // back to it from another slot.
+                if (want != 0 && mech == 0) Announce(mgr);
+
+                List<object> devices = Invoke(Export, method);
+                int raw = devices.Count;
+                if (!fromNetwork && want != 0 && mech == 0)
+                    Rescue(method, mgr, want, devices);
+                Filter(want, devices);
+
+                string seen = want + "/" + mech;
+                if (!asked.Contains(seen))
+                {
+                    asked.Add(seen);
+                    Log(Export + ": scanDeviceType=" + want + " scanMechanism=" + mech
+                        + " -> " + raw + " from the game, " + devices.Count + " after us");
+                }
+                return devices;
+            }
+
+            /// Append the scan list, as the slot that was asked for.
+            void Rescue(MethodInfo method, object mgr, int want, List<object> devices)
+            {
+                var paired = new List<string>();
+                foreach (object d in devices) paired.Add(NameOf(d));
+
+                object was = scanType.GetValue(mgr);
+                List<object> net;
+                try
+                {
+                    scanType.SetValue(mgr, Enum.ToObject(scanType.FieldType, E_PowerSource));
+                    net = Invoke(Export, method);
+                }
+                finally { scanType.SetValue(mgr, was); }
+
+                object slot = Enum.ToObject(devType.FieldType, want);
+                foreach (object d in net)
+                {
+                    // A sensor the game already offers for this slot out of
+                    // pairedList must not arrive twice under two identifiers.
+                    if (paired.Contains(NameOf(d))) continue;
+                    devType.SetValue(d, slot);
+                    devices.Add(d);
+
+                    // Once per sensor and slot: this runs on every poll of an
+                    // open search, twice a second.
+                    string once = NameOf(d) + "/" + want;
+                    if (!offered.Contains(once))
+                    {
+                        offered.Add(once);
+                        Log(Export + ": offering \"" + NameOf(d) + "\" for device type " + want);
+                    }
+                }
+            }
+
+            /// Put our sensors back into the game's scan list.
+            ///
+            /// This is the other half of the problem, and it is a timing one.
+            /// `StartScan` -- which is what opening a slot's search calls --
+            /// clears `scannedList`, and re-browses only when it is not already
+            /// scanning.  Moving from the trainer's slot to the heart-rate one
+            /// does exactly that: the list is emptied, no new `ServiceResolved`
+            /// arrives because the browse is already running, and the single
+            /// poll the widget makes finds nothing.  Measured: resolves at
+            /// 22:47:53, the search opened at 22:47:59, `0 from the game`.
+            ///
+            /// So write the entries the resolve would have written, in the
+            /// format `ServiceResolved` builds them in
+            /// (`serial:x:name:x:domain:x:regtype:x:host:x:port`, keyed on the
+            /// host name) and let the game's own code turn them into structs.
+            /// Nothing is invented: `../fakesensor/fakebonjour.c` publishes the
+            /// table of what it is advertising, and this is the same six fields
+            /// it hands to `ServiceResolved`.
+            ///
+            /// A resolve writes an entry whether or not the sensor is already
+            /// connected, so this puts back exactly what a browse would have --
+            /// including for the trainer's own slot, which empties the same way
+            /// when you return to it from another slot.
+            void Announce(object mgr)
+            {
+                IDictionary list = scannedList.GetValue(mgr) as IDictionary;
+                if (list == null) return;
+                foreach (DeviceTable.Entry e in DeviceTable.Read())
+                {
+                    if (e.Host == null || e.Serial == null || e.Port == 0) continue;
+                    if (list.Contains(e.Host)) continue;
+                    list[e.Host] = e.Serial + ":x:" + e.Name + ":x:local.:x:"
+                                 + "_wahoo-fitness-tnp._tcp.:x:" + e.Host + ":x:" + e.Port;
+                    if (!announced.Contains(e.Host))
+                    {
+                        announced.Add(e.Host);
+                        Log(Export + ": announcing \"" + e.Name + "\" at " + e.Host + ":" + e.Port
+                            + "; the scan list had been cleared without a re-browse");
+                    }
+                }
+            }
+
+            readonly List<string> announced = new List<string>();
+
+            /// Drop sensors that cannot fill the slot being scanned for.  A
+            /// power-only trainer has no business in the heart-rate list, and
+            /// a strap has none in the trainer list; the game cannot tell,
+            /// since it has not connected to either yet, but the handshake
+            /// file says what each one serves.
+            void Filter(int want, List<object> devices)
+            {
+                uint need = Needed(want);
+                if (need == 0) return;
+                List<DeviceTable.Entry> table = DeviceTable.Read();
+                if (table.Count == 0) return;
+
+                for (int i = devices.Count - 1; i >= 0; i--)
+                {
+                    string n = NameOf(devices[i]);
+                    DeviceTable.Entry e = table.Find(x => x.Name == n);
+                    if (n == null || e == null) continue;
+                    if ((e.Caps & need) != 0) continue;
+                    devices.RemoveAt(i);
+                    Log(Export + ": \"" + n + "\" cannot serve device type " + want + ", hiding it");
+                }
+            }
+
+            static uint Needed(int slot)
+            {
+                switch (slot)
+                {
+                    case E_PowerSource:
+                    case E_SecondaryPower: return DeviceTable.Power;
+                    case E_Controllable:   return DeviceTable.Controllable;
+                    case E_Cadence:        return DeviceTable.Cadence;
+                    case E_HeartRate:      return DeviceTable.Heart;
+                    default:               return 0;
+                }
+            }
+
+            string NameOf(object dev)
+            {
+                try { return (string)devName.GetValue(dev); }
+                catch (Exception e)
+                {
+                    if (!complained) { complained = true; Log(Export + ": " + e.Message); }
+                    return null;
+                }
+            }
+        }
+
+        /// What each advertised sensor actually serves.  `fakebonjour.c` writes
+        /// this at load time, whatever the sensors were configured from --
+        /// `blebridge.py`'s handshake, or the environment -- so there is one
+        /// file to read and the two sides cannot disagree about which strap is
+        /// which.  One `name=` per record, a `caps=` naming what it serves; a
+        /// record with no `caps=` is taken to have everything, which is what
+        /// the DLL assumes too.
+        /// What `../fakesensor/fakebonjour.c` is advertising: one record per
+        /// sensor, written at load time whatever the sensors were configured
+        /// from -- `blebridge.py`'s handshake, or the environment -- so there is
+        /// one file to read and the two sides cannot disagree about which strap
+        /// is which.  A `name=` starts a record; `serial=`, `host=`, `port=` are
+        /// what a scan entry is made of, and `caps=` says which slots the sensor
+        /// can fill.  A record with no `caps=` is taken to serve everything,
+        /// which is what the DLL assumes too.
+        static class DeviceTable
+        {
+            internal const uint Power = 1, Cadence = 2, Controllable = 4, Heart = 8;
+            internal const uint All = Power | Cadence | Controllable | Heart;
+
+            const string Path = @"C:\fakesensor-table";
+
+            internal sealed class Entry
+            {
+                internal string Name, Serial, Host;
+                internal int Port;
+                internal uint Caps = All;
+            }
+
+            static List<Entry> cache = new List<Entry>();
+            static DateTime stamp;
+            static long size = -1;
+
+            /// Empty when there is no file to go on, which means no filtering
+            /// and nothing to announce.
+            internal static List<Entry> Read()
+            {
+                try
+                {
+                    var fi = new FileInfo(Path);
+                    if (!fi.Exists) { cache = new List<Entry>(); size = -1; return cache; }
+                    if (fi.LastWriteTimeUtc == stamp && fi.Length == size) return cache;
+                    stamp = fi.LastWriteTimeUtc;
+                    size = fi.Length;
+                    cache = Parse(File.ReadAllLines(Path));
+                    return cache;
+                }
+                catch (Exception e) { Log("device table: " + e.Message); return cache; }
+            }
+
+            static List<Entry> Parse(string[] lines)
+            {
+                var table = new List<Entry>();
+                Entry cur = null;
+                foreach (string line in lines)
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string key = line.Substring(0, eq).Trim();
+                    string val = line.Substring(eq + 1).Trim();
+                    if (key == "name") { cur = new Entry { Name = val }; table.Add(cur); continue; }
+                    if (cur == null) continue;
+                    if (key == "serial") cur.Serial = val;
+                    else if (key == "host") cur.Host = val;
+                    else if (key == "port") int.TryParse(val, out cur.Port);
+                    else if (key == "caps") cur.Caps = Bits(val);
+                }
+                return table;
+            }
+
+            static uint Bits(string list)
+            {
+                uint bits = 0;
+                foreach (string raw in list.Split(','))
+                {
+                    string c = raw.Trim();
+                    if (c == "power") bits |= Power;
+                    else if (c == "cadence") bits |= Cadence;
+                    else if (c == "controllable") bits |= Controllable;
+                    else if (c == "hr" || c == "heart") bits |= Heart;
+                    else if (c.Length > 0) Log("device table: unknown capability \"" + c + "\"");
+                }
+                return bits;
+            }
+        }
+
         sealed class Poller
         {
             readonly string name;
             readonly MethodInfo method;
             readonly int esize;
+            readonly ScanRescue rescue;   // null except on WD_GetScannedDevicesList
             bool firstCall = true;
 
-            internal Poller(string name, MethodInfo method, Type elem)
+            internal Poller(string name, MethodInfo method, Type elem, ScanRescue rescue)
             {
                 this.name = name;
                 this.method = method;
                 this.esize = Marshal.SizeOf(elem);
+                this.rescue = rescue;
             }
 
             internal int Call(IntPtr ppDevices)
@@ -259,14 +612,9 @@ namespace MyWhoosh
 
                 // A direct managed call: the signature mono cannot marshal is
                 // not marshalled at all on this side.
-                var args = new object[] { null };
-                object ret = method.Invoke(null, args);
-                Array devices = (Array)args[0];
+                List<object> devices = rescue == null ? Invoke(name, method) : rescue.Poll(method);
 
-                int count = devices == null ? 0 : devices.Length;
-                int reported = ret is int ? (int)ret : count;
-                if (reported != count)
-                    Log(name + ": returned " + reported + " but the array holds " + count);
+                int count = devices.Count;
 
                 // Mirror the CLR's out-direction: a fresh CoTaskMemAlloc block,
                 // its address stored through the pointer, the count returned.
@@ -276,7 +624,7 @@ namespace MyWhoosh
                 IntPtr block = Marshal.AllocCoTaskMem(bytes);
                 for (int i = 0; i < bytes; i++) Marshal.WriteByte(block, i, 0);
                 for (int i = 0; i < count; i++)
-                    Marshal.StructureToPtr(devices.GetValue(i),
+                    Marshal.StructureToPtr(devices[i],
                                            new IntPtr(block.ToInt64() + (long)i * esize), false);
 
                 if (ppDevices != IntPtr.Zero) Marshal.WriteIntPtr(ppDevices, block);

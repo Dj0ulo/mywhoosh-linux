@@ -1,11 +1,11 @@
 /*
- * A stand-in for Apple's Bonjour COM server plus the trainer behind it.
+ * A stand-in for Apple's Bonjour COM server plus the sensors behind it.
  *
  * Registered under Bonjour's two CLSIDs, this DLL is loaded into the game's own
  * process instead of dnssdX.dll.  It answers Browse()/Resolve() out of its own
- * head -- one hard-coded sensor, no mDNS on the wire at all -- and serves that
- * sensor's GATT services over a loopback TCP socket in Wahoo's Direct Connect
- * protocol.  The point is to prove the whole in-app path end to end without
+ * head -- from a small table of sensors, no mDNS on the wire at all -- and
+ * serves each sensor's GATT services over a loopback TCP socket in Wahoo's
+ * Direct Connect protocol.  The point is to prove the whole in-app path end to end without
  * Apple's mDNSResponder, which under Wine never joins the multicast group (see
  * ../dircon/README.md).
  *
@@ -29,21 +29,26 @@
  *    calling (STA) thread carries the callbacks, which is also how Bonjour
  *    itself delivers them.
  *
- * Environment:
+ * Environment (this describes the first sensor; the handshake file below can
+ * describe several):
  *   FAKESENSOR_NAME    service instance name         (default FakeTrainer)
  *   FAKESENSOR_SERIAL  serial-number TXT value, digits only, parsed as UInt64
  *   FAKESENSOR_MAC     mac-address TXT value
  *   FAKESENSOR_PORT    Dircon TCP port               (default 36866)
  *   FAKESENSOR_POWER   watts reported on 0x2a63      (default 150)
  *   FAKESENSOR_BPM     heart rate reported on 0x2a37 (default 75)
+ *   FAKESENSOR_CAPS    slots it may fill: power,cadence,controllable,hr
+ *   FAKESENSOR_HR      1 = advertise a second, heart-rate-only fake sensor on
+ *                      FAKESENSOR_PORT+1, so the game's heart-rate slot can be
+ *                      exercised without a strap
  *   FAKESENSOR_SINKBASE  first event vtable slot     (default 7)
  *   FAKESENSOR_EXTERNAL  1 = do not serve Dircon ourselves; something else
  *                        already listens on FAKESENSOR_PORT (blebridge.py)
  *   FAKESENSOR_LOG     log file; otherwise stderr
  *
- * C:\\fakesensor-device, if it exists, overrides name/serial/mac/port from the
- * environment and implies FAKESENSOR_EXTERNAL -- blebridge.py writes it for the
- * trainer it has actually connected to.  See load_handshake.
+ * C:\\fakesensor-device, if it exists, replaces the whole table and implies
+ * FAKESENSOR_EXTERNAL -- blebridge.py writes it for the devices it has actually
+ * connected to, one record per `name=' key.  See load_handshake.
  */
 
 #include <winsock2.h>
@@ -59,14 +64,42 @@
 
 /* ------------------------------------------------------------------ config */
 
-static char cfg_name[64]   = "FakeTrainer";
-static char cfg_serial[32] = "1234567890";
-static char cfg_mac[32]    = "de:ad:be:ef:00:01";
-static int  cfg_port       = 36866;
-static int  cfg_power      = 150;
-static int  cfg_bpm        = 75;
+/* One advertised sensor.  There used to be exactly one, hard-coded -- but the
+ * game pairs each slot separately (power, cadence, controllable, heart rate),
+ * so a heart-rate strap next to a trainer is a second service, with its own
+ * name, its own hostname, its own serial and its own Dircon port. */
+
+#define MAX_DEVICES 8
+
+/* Which slots a sensor is willing to be paired as.  The game asks for one slot
+ * at a time (EDeviceTypeEnum), and ../exportshim uses these to keep a sensor
+ * out of a slot it cannot fill -- a heart-rate strap is not a trainer. */
+#define CAP_POWER        1
+#define CAP_CADENCE      2
+#define CAP_CONTROLLABLE 4
+#define CAP_HEART        8
+#define CAP_ALL          (CAP_POWER | CAP_CADENCE | CAP_CONTROLLABLE | CAP_HEART)
+
+typedef struct {
+    char name[64];
+    char serial[32];
+    char mac[32];
+    int  port;
+    int  power;              /* what the built-in server reports on 0x2a63 ... */
+    int  bpm;                /* ... and on 0x2a37, when it serves this port */
+    unsigned caps;
+    int  external;           /* something else already listens on `port' */
+    char hostname[128];      /* Browse fills these in: the names we report */
+    char fullname[192];
+    volatile LONG serving;   /* our Dircon thread is up */
+} device;
+
+static device devs[MAX_DEVICES];
+static int  ndevs;
+
 static int  cfg_sink_base  = 7;
 static int  cfg_external   = 0;
+static int  cfg_hr         = 0;
 
 static FILE *logfp;
 static CRITICAL_SECTION loglock;
@@ -98,7 +131,49 @@ static void env_int(const char *name, int *out)
     if (v && *v) *out = atoi(v);
 }
 
-/* blebridge.py writes this when it has a real trainer on the wire.  The DLL
+static unsigned parse_caps(const char *s)
+{
+    unsigned caps = 0;
+    while (*s) {
+        while (*s == ',' || *s == ' ') s++;
+        if (!strncmp(s, "power", 5))             caps |= CAP_POWER;
+        else if (!strncmp(s, "cadence", 7))      caps |= CAP_CADENCE;
+        else if (!strncmp(s, "controllable", 12)) caps |= CAP_CONTROLLABLE;
+        else if (!strncmp(s, "hr", 2) || !strncmp(s, "heart", 5)) caps |= CAP_HEART;
+        else if (*s) logmsg("unknown capability in \"%s\", ignoring it", s);
+        while (*s && *s != ',') s++;
+    }
+    return caps;
+}
+
+static const char *caps_str(unsigned caps, char *out, size_t n)
+{
+    size_t len;
+    snprintf(out, n, "%s%s%s%s",
+             caps & CAP_POWER        ? "power,"        : "",
+             caps & CAP_CADENCE      ? "cadence,"      : "",
+             caps & CAP_CONTROLLABLE ? "controllable," : "",
+             caps & CAP_HEART        ? "hr,"           : "");
+    len = strlen(out);
+    if (len) out[len - 1] = 0;          /* the trailing comma */
+    return out;
+}
+
+static void default_devices(void)
+{
+    device *d = &devs[0];
+    memset(devs, 0, sizeof devs);
+    ndevs = 1;
+    strcpy(d->name, "FakeTrainer");
+    strcpy(d->serial, "1234567890");
+    strcpy(d->mac, "de:ad:be:ef:00:01");
+    d->port = 36866;
+    d->power = 150;
+    d->bpm = 75;
+    d->caps = CAP_ALL;
+}
+
+/* blebridge.py writes this when it has real hardware on the wire.  The DLL
  * runs inside the game and the bridge is a separate Linux process, so there is
  * no other channel between them in time: the name and serial have to be known
  * before the discovery answer goes out, which is long before anything connects
@@ -111,9 +186,21 @@ static void env_int(const char *name, int *out)
  * serving the socket. */
 #define HANDSHAKE_PATH "C:\\fakesensor-device"
 
+/* What the export shim reads.  It has to filter the game's scan list by slot
+   -- the game knows nothing about a sensor before it connects, so without this
+   a strap sits in the trainer list and a power-only trainer in the heart-rate
+   one -- and the handshake above is not enough on its own, because it only
+   exists when blebridge.py is running.  So publish the effective table here,
+   however it was configured, and let the shim read one file.  See
+   ../exportshim/ExportShim.cs, DeviceCaps. */
+#define TABLE_PATH "C:\\fakesensor-table"
+
 static void load_handshake(void)
 {
-    char line[256];
+    char line[256], caps[64];
+    device parsed[MAX_DEVICES];
+    device *d = NULL;
+    int n_parsed = 0, i;
     FILE *f = fopen(HANDSHAKE_PATH, "r");
     if (!f)
         return;
@@ -131,34 +218,127 @@ static void load_handshake(void)
             val[--n] = 0;
         if (!n)
             continue;
-        if (!strcmp(key, "name"))        { strncpy(cfg_name, val, sizeof cfg_name - 1); cfg_name[sizeof cfg_name - 1] = 0; }
-        else if (!strcmp(key, "serial")) { strncpy(cfg_serial, val, sizeof cfg_serial - 1); cfg_serial[sizeof cfg_serial - 1] = 0; }
-        else if (!strcmp(key, "mac"))    { strncpy(cfg_mac, val, sizeof cfg_mac - 1); cfg_mac[sizeof cfg_mac - 1] = 0; }
-        else if (!strcmp(key, "port"))   cfg_port = atoi(val);
+        /* `name' starts a record, which is what makes the one-device file an
+           older bridge wrote still mean one device. */
+        if (!strcmp(key, "name")) {
+            if (n_parsed == MAX_DEVICES) {
+                logmsg("handshake: more than %d devices, ignoring the rest", MAX_DEVICES);
+                break;
+            }
+            d = &parsed[n_parsed++];
+            memset(d, 0, sizeof *d);
+            d->port = 36866 + n_parsed - 1;
+            d->power = 150;
+            d->bpm = 75;
+            d->caps = CAP_ALL;      /* an older bridge says nothing about slots */
+            strncpy(d->name, val, sizeof d->name - 1);
+        }
+        else if (!d)                     logmsg("handshake: \"%s\" before any name=, ignored", key);
+        else if (!strcmp(key, "serial")) strncpy(d->serial, val, sizeof d->serial - 1);
+        else if (!strcmp(key, "mac"))    strncpy(d->mac, val, sizeof d->mac - 1);
+        else if (!strcmp(key, "port"))   d->port = atoi(val);
+        else if (!strcmp(key, "caps"))   d->caps = parse_caps(val);
+        else if (!strcmp(key, "power"))  d->power = atoi(val);
+        else if (!strcmp(key, "bpm"))    d->bpm = atoi(val);
     }
     fclose(f);
-    cfg_external = 1;
-    logmsg("handshake %s: name=\"%s\" serial=%s mac=%s port=%d",
-           HANDSHAKE_PATH, cfg_name, cfg_serial, cfg_mac, cfg_port);
+
+    if (!n_parsed) {
+        logmsg("handshake %s has no device records; keeping the configured one", HANDSHAKE_PATH);
+        return;
+    }
+    memset(devs, 0, sizeof devs);
+    for (i = 0; i < n_parsed; i++) {
+        devs[i] = parsed[i];
+        /* whoever wrote the file is serving the socket */
+        devs[i].external = 1;
+        logmsg("handshake %s: name=\"%s\" serial=%s mac=%s port=%d caps=%s",
+               HANDSHAKE_PATH, devs[i].name, devs[i].serial, devs[i].mac, devs[i].port,
+               caps_str(devs[i].caps, caps, sizeof caps));
+    }
+    ndevs = n_parsed;
+}
+
+/* The names we answer with.  MyWhoosh keys its service table on the instance
+   name and its scan list on the host name, so two sensors need two of each --
+   with the spaces dashed out, which is what it does to the name itself. */
+static void build_names(void)
+{
+    int i, j;
+    for (i = 0; i < ndevs; i++) {
+        device *d = &devs[i];
+        char *p;
+        snprintf(d->hostname, sizeof d->hostname, "%s.local.", d->name);
+        for (j = 0; j < i; j++) {
+            if (strcmp(devs[j].name, d->name) != 0) continue;
+            /* Two sensors under one name would share a scan-list entry and a
+               service-table entry; the host name at least stays distinct. */
+            logmsg("two sensors are both called \"%s\"; giving the second host name a suffix",
+                   d->name);
+            snprintf(d->hostname, sizeof d->hostname, "%s-%d.local.", d->name, i + 1);
+            break;
+        }
+        for (p = d->hostname; *p; p++) if (*p == ' ') *p = '-';
+        snprintf(d->fullname, sizeof d->fullname, "%s._wahoo-fitness-tnp._tcp.local.", d->name);
+    }
+}
+
+/* Hand the export shim the table we ended up with. */
+static void publish_table(void)
+{
+    char caps[64];
+    int i;
+    FILE *f = fopen(TABLE_PATH, "w");
+
+    if (!f) { logmsg("cannot write %s; the shim cannot fill the slots we do", TABLE_PATH); return; }
+    for (i = 0; i < ndevs; i++)
+        fprintf(f, "name=%s\nserial=%s\nhost=%s\nport=%d\ncaps=%s\n",
+                devs[i].name, devs[i].serial, devs[i].hostname, devs[i].port,
+                caps_str(devs[i].caps, caps, sizeof caps));
+    fclose(f);
 }
 
 static void load_config(void)
 {
     const char *path = getenv("FAKESENSOR_LOG");
+    const char *caps;
+    int i;
+
     logfp = stderr;
     if (path && *path) {
         FILE *f = fopen(path, "a");
         if (f) logfp = f;
     }
-    env_str("FAKESENSOR_NAME", cfg_name, sizeof cfg_name);
-    env_str("FAKESENSOR_SERIAL", cfg_serial, sizeof cfg_serial);
-    env_str("FAKESENSOR_MAC", cfg_mac, sizeof cfg_mac);
-    env_int("FAKESENSOR_PORT", &cfg_port);
-    env_int("FAKESENSOR_POWER", &cfg_power);
-    env_int("FAKESENSOR_BPM", &cfg_bpm);
+    default_devices();
+    env_str("FAKESENSOR_NAME", devs[0].name, sizeof devs[0].name);
+    env_str("FAKESENSOR_SERIAL", devs[0].serial, sizeof devs[0].serial);
+    env_str("FAKESENSOR_MAC", devs[0].mac, sizeof devs[0].mac);
+    env_int("FAKESENSOR_PORT", &devs[0].port);
+    env_int("FAKESENSOR_POWER", &devs[0].power);
+    env_int("FAKESENSOR_BPM", &devs[0].bpm);
+    caps = getenv("FAKESENSOR_CAPS");
+    if (caps && *caps) devs[0].caps = parse_caps(caps);
     env_int("FAKESENSOR_SINKBASE", &cfg_sink_base);
     env_int("FAKESENSOR_EXTERNAL", &cfg_external);
+    env_int("FAKESENSOR_HR", &cfg_hr);
+
+    /* A second built-in sensor that only offers heart rate, so the in-game
+       heart-rate slot can be exercised with no hardware at all. */
+    if (cfg_hr) {
+        device *d = &devs[1];
+        strcpy(d->name, "FakeHRM");
+        snprintf(d->serial, sizeof d->serial, "1234567891");
+        strcpy(d->mac, "de:ad:be:ef:00:02");
+        d->port = devs[0].port + 1;
+        d->bpm = devs[0].bpm;
+        d->caps = CAP_HEART;
+        ndevs = 2;
+    }
+    for (i = 0; i < ndevs; i++)
+        devs[i].external = cfg_external;
     load_handshake();
+    build_names();
+    publish_table();
 }
 
 /* -------------------------------------------------------------------- GUIDs */
@@ -328,7 +508,7 @@ typedef struct txtrecVtbl {
     HRESULT (STDMETHODCALLTYPE *GetValueAtIndex)(txtrec *, UINT, VARIANT *);
 } txtrecVtbl;
 
-struct txtrec { const txtrecVtbl *vtbl; LONG ref; };
+struct txtrec { const txtrecVtbl *vtbl; LONG ref; const device *dev; };
 
 static const txtrecVtbl txt_vtbl;
 
@@ -381,7 +561,7 @@ static HRESULT STDMETHODCALLTYPE txt_GetKeyAtIndex(txtrec *t, UINT i, BSTR *out)
 
 static HRESULT STDMETHODCALLTYPE txt_GetValueAtIndex(txtrec *t, UINT i, VARIANT *out)
 {
-    const char *v = (i == 0) ? cfg_mac : cfg_serial;
+    const char *v = (i == 0) ? t->dev->mac : t->dev->serial;
     ULONG n = (ULONG)strlen(v);
     SAFEARRAY *sa;
     void *data;
@@ -406,11 +586,12 @@ static const txtrecVtbl txt_vtbl = {
     txt_GetCount, txt_GetKeyAtIndex, txt_GetValueAtIndex,
 };
 
-static txtrec *txt_new(void)
+static txtrec *txt_new(const device *d)
 {
     txtrec *t = (txtrec *)calloc(1, sizeof *t);
     t->vtbl = &txt_vtbl;
     t->ref = 1;
+    t->dev = d;
     return t;
 }
 
@@ -629,49 +810,52 @@ static evmgr *evmgr_new(void)
 static evmgr *g_mgr;             /* whoever Browse() was handed */
 static svc *g_browser;
 static svc *g_resolver;
-static char g_hostname[128];     /* must equal name-with-dashes + ".local." */
-static char g_fullname[192];
 static UINT g_ifindex = 1;
 
+/* Which device the callback is about travels in the message's WPARAM: the
+   events are delivered on the browsing thread, after the call that asked for
+   them returned, so there is nowhere else to put it. */
 #define WM_FAKE_FOUND    (WM_APP + 1)
 #define WM_FAKE_RESOLVED (WM_APP + 2)
 
-static void fire_found(void)
+static void fire_found(int i)
 {
     ServiceFoundFn fn;
     BSTR name, regtype, domain;
     HRESULT hr;
 
+    if (i < 0 || i >= ndevs) return;
     if (!g_mgr || !g_mgr->sink_ev) { logmsg("ServiceFound: nothing Advised, dropping"); return; }
     fn = (ServiceFoundFn)sink_slot(g_mgr->sink_ev, EV_FOUND);
-    name = bstr(cfg_name);
+    name = bstr(devs[i].name);
     regtype = bstr("_wahoo-fitness-tnp._tcp.");
     domain = bstr("local.");
     /* flags 2 is Bonjour's kDNSServiceFlagsAdd; MyWhoosh only logs it. */
     hr = fn(g_mgr->sink_ev, g_browser, 2, g_ifindex, name, regtype, domain);
-    logmsg("ServiceFound(\"%s\") -> 0x%08lx", cfg_name, (unsigned long)hr);
+    logmsg("ServiceFound(\"%s\") -> 0x%08lx", devs[i].name, (unsigned long)hr);
     SysFreeString(name); SysFreeString(regtype); SysFreeString(domain);
 }
 
-static void fire_resolved(void)
+static void fire_resolved(int i)
 {
     ServiceResolvedFn fn;
     BSTR full, host;
     txtrec *txt;
     HRESULT hr;
 
+    if (i < 0 || i >= ndevs) return;
     if (!g_mgr || !g_mgr->sink_ev) { logmsg("ServiceResolved: nothing Advised, dropping"); return; }
     fn = (ServiceResolvedFn)sink_slot(g_mgr->sink_ev, EV_RESOLVED);
-    full = bstr(g_fullname);
-    host = bstr(g_hostname);
-    txt = txt_new();
+    full = bstr(devs[i].fullname);
+    host = bstr(devs[i].hostname);
+    txt = txt_new(&devs[i]);
     hr = fn(g_mgr->sink_ev, g_resolver, 0, g_ifindex, full, host,
-            (unsigned short)cfg_port, txt);
+            (unsigned short)devs[i].port, txt);
     /* MyWhoosh's ServiceResolved ends with `resolver.Stop()` on a field that is
        never assigned, so it always throws NullReferenceException back at us --
        after doing everything that matters.  0x80004003 here is expected. */
-    logmsg("ServiceResolved(\"%s\" at %s:%d) -> 0x%08lx%s", g_fullname, g_hostname, cfg_port,
-           (unsigned long)hr,
+    logmsg("ServiceResolved(\"%s\" at %s:%d) -> 0x%08lx%s",
+           devs[i].fullname, devs[i].hostname, devs[i].port, (unsigned long)hr,
            hr == 0x80004003L ? "  (the game's own NullReferenceException, harmless)" : "");
     txt->vtbl->Release(txt);
     SysFreeString(full); SysFreeString(host);
@@ -680,8 +864,8 @@ static void fire_resolved(void)
 static LRESULT CALLBACK fake_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-    case WM_FAKE_FOUND:    fire_found();    return 0;
-    case WM_FAKE_RESOLVED: fire_resolved(); return 0;
+    case WM_FAKE_FOUND:    fire_found((int)wp);    return 0;
+    case WM_FAKE_RESOLVED: fire_resolved((int)wp); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -732,8 +916,6 @@ static const unsigned char UUID_HEART_RATE[16]    = UUID16(0x180d);
 static const unsigned char UUID_POWER_MEAS[16]    = UUID16(0x2a63);
 static const unsigned char UUID_HR_MEAS[16]       = UUID16(0x2a37);
 
-static volatile LONG dircon_started;
-
 static int send_all(SOCKET s, const unsigned char *p, int n)
 {
     while (n > 0) {
@@ -769,13 +951,13 @@ static int send_msg(SOCKET s, int msgid, int seq, const unsigned char *body, int
 
 static int is_uuid(const unsigned char *b, const unsigned char *uuid) { return memcmp(b, uuid, 16) == 0; }
 
-static void serve_client(SOCKET c)
+static void serve_client(device *d, SOCKET c)
 {
     unsigned char hdr[6], body[1024], out[1024];
     int notify_power = 0, notify_hr = 0, tick = 0;
     DWORD last = GetTickCount();
 
-    logmsg("dircon: client connected");
+    logmsg("dircon: client connected on port %d (%s)", d->port, d->name);
     for (;;) {
         fd_set rd;
         struct timeval tv;
@@ -800,18 +982,28 @@ static void serve_client(SOCKET c)
             logmsg("dircon: request id=%d seq=%d len=%d", id, seq, len);
 
             switch (id) {
-            case 1:   /* discover services */
-                memcpy(out, UUID_CYCLING_POWER, 16);
-                memcpy(out + 16, UUID_HEART_RATE, 16);
-                if (!send_msg(c, 1, seq, out, 32)) goto done;
+            case 1: { /* discover services -- only what this sensor claims */
+                int n = 0;
+                if (d->caps & (CAP_POWER | CAP_CADENCE | CAP_CONTROLLABLE)) {
+                    memcpy(out + n, UUID_CYCLING_POWER, 16);
+                    n += 16;
+                }
+                if (d->caps & CAP_HEART) {
+                    memcpy(out + n, UUID_HEART_RATE, 16);
+                    n += 16;
+                }
+                if (!send_msg(c, 1, seq, out, n)) goto done;
                 break;
+            }
 
             case 2: { /* discover characteristics of one service */
                 const unsigned char *ch;
                 if (len < 16) goto bad;
                 memcpy(out, body, 16);
-                ch = is_uuid(body, UUID_CYCLING_POWER) ? UUID_POWER_MEAS
-                   : is_uuid(body, UUID_HEART_RATE)    ? UUID_HR_MEAS : NULL;
+                ch = is_uuid(body, UUID_CYCLING_POWER) && (d->caps & (CAP_POWER | CAP_CADENCE | CAP_CONTROLLABLE))
+                        ? UUID_POWER_MEAS
+                   : is_uuid(body, UUID_HEART_RATE) && (d->caps & CAP_HEART)
+                        ? UUID_HR_MEAS : NULL;
                 if (!ch) {
                     logmsg("dircon: characteristics asked for an unknown service");
                     if (!send_msg(c, 2, seq, out, 16)) goto done;
@@ -860,7 +1052,7 @@ static void serve_client(SOCKET c)
             last += 1000;
             tick++;
             if (notify_power) {
-                int watts = cfg_power + (tick % 5) * 2;
+                int watts = d->power + (tick % 5) * 2;
                 memcpy(out, UUID_POWER_MEAS, 16);
                 out[16] = 0; out[17] = 0;                       /* flags: nothing optional */
                 out[18] = (unsigned char)(watts & 0xff);        /* sint16, little endian */
@@ -868,7 +1060,7 @@ static void serve_client(SOCKET c)
                 if (!send_msg(c, 6, 0, out, 20)) goto done;
             }
             if (notify_hr) {
-                int bpm = cfg_bpm + (tick % 7);
+                int bpm = d->bpm + (tick % 7);
                 memcpy(out, UUID_HR_MEAS, 16);
                 out[16] = 0;                                    /* flags: 8-bit value */
                 out[17] = (unsigned char)bpm;
@@ -877,12 +1069,13 @@ static void serve_client(SOCKET c)
         }
     }
 done:
-    logmsg("dircon: client gone");
+    logmsg("dircon: client gone (port %d)", d->port);
     closesocket(c);
 }
 
-static DWORD WINAPI dircon_thread(void *unused)
+static DWORD WINAPI dircon_thread(void *arg)
 {
+    device *d = (device *)arg;
     WSADATA wsa;
     SOCKET l;
     struct sockaddr_in a;
@@ -896,32 +1089,39 @@ static DWORD WINAPI dircon_thread(void *unused)
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = htons((unsigned short)cfg_port);
+    a.sin_port = htons((unsigned short)d->port);
     if (bind(l, (struct sockaddr *)&a, sizeof a) != 0) {
-        logmsg("bind 127.0.0.1:%d failed: %d", cfg_port, WSAGetLastError());
+        logmsg("bind 127.0.0.1:%d failed: %d", d->port, WSAGetLastError());
         closesocket(l);
         return 1;
     }
     if (listen(l, 4) != 0) { logmsg("listen failed: %d", WSAGetLastError()); closesocket(l); return 1; }
-    logmsg("dircon: listening on 127.0.0.1:%d", cfg_port);
+    logmsg("dircon: listening on 127.0.0.1:%d for \"%s\"", d->port, d->name);
 
     for (;;) {
         SOCKET c = accept(l, NULL, NULL);
         if (c == INVALID_SOCKET) break;
-        serve_client(c);
+        serve_client(d, c);
     }
     closesocket(l);
     return 0;
 }
 
-static void dircon_start(void)
+/* One listener per sensor we serve ourselves.  Each is its own thread because
+   the game opens one Dircon connection per sensor and keeps it open. */
+static void dircon_start_all(void)
 {
-    if (cfg_external) {
-        logmsg("dircon: FAKESENSOR_EXTERNAL, expecting a server on port %d already", cfg_port);
-        return;
+    int i;
+    for (i = 0; i < ndevs; i++) {
+        device *d = &devs[i];
+        if (d->external) {
+            logmsg("dircon: \"%s\" is served elsewhere, expecting a server on port %d already",
+                   d->name, d->port);
+            continue;
+        }
+        if (InterlockedCompareExchange(&d->serving, 1, 0) != 0) continue;
+        CloseHandle(CreateThread(NULL, 0, dircon_thread, d, 0, NULL));
     }
-    if (InterlockedCompareExchange(&dircon_started, 1, 0) != 0) return;
-    CloseHandle(CreateThread(NULL, 0, dircon_thread, NULL, 0, NULL));
 }
 
 /* ------------------------------------------------- Browse / Resolve / Stop */
@@ -956,16 +1156,14 @@ static HRESULT STDMETHODCALLTYPE svc_Browse(svc *s, int flags, UINT ifIndex, BST
     svc_AddRef(g_browser);          /* one reference for us, one for the caller */
     *out = g_browser;
 
-    snprintf(g_hostname, sizeof g_hostname, "%s.local.", cfg_name);
-    {   /* MyWhoosh keys its service table on the name with spaces dashed out,
-           and looks the entry up again by the host name we report. */
-        char *p;
-        for (p = g_hostname; *p; p++) if (*p == ' ') *p = '-';
+    dircon_start_all();
+    {   /* One ServiceFound per sensor.  The game resolves each in turn, and
+               ends up with one scan-list entry per sensor. */
+        HWND h = callback_window();
+        int i;
+        for (i = 0; i < ndevs; i++)
+            PostMessageW(h, WM_FAKE_FOUND, (WPARAM)i, 0);
     }
-    snprintf(g_fullname, sizeof g_fullname, "%s._wahoo-fitness-tnp._tcp.local.", cfg_name);
-
-    dircon_start();
-    PostMessageW(callback_window(), WM_FAKE_FOUND, 0, 0);
     return S_OK;
 }
 
@@ -974,6 +1172,7 @@ static HRESULT STDMETHODCALLTYPE svc_Resolve(svc *s, int flags, UINT ifIndex, BS
 {
     char n[128] = "";
     evmgr *m = manager_of(mgr);
+    int i, idx = -1;
 
     if (!out) return E_POINTER;
     if (name) WideCharToMultiByte(CP_UTF8, 0, name, -1, n, sizeof n, NULL, NULL);
@@ -986,7 +1185,17 @@ static HRESULT STDMETHODCALLTYPE svc_Resolve(svc *s, int flags, UINT ifIndex, BS
     svc_AddRef(g_resolver);
     *out = g_resolver;
 
-    PostMessageW(callback_window(), WM_FAKE_RESOLVED, 0, 0);
+    /* Answer for the sensor that was asked about: with more than one
+       advertised, resolving them all to the first would give the game one
+       device wearing several names. */
+    for (i = 0; i < ndevs; i++)
+        if (!strcmp(n, devs[i].name)) { idx = i; break; }
+    if (idx < 0) {
+        logmsg("Resolve: \"%s\" is not one of ours, reporting nothing", n);
+        return S_OK;
+    }
+
+    PostMessageW(callback_window(), WM_FAKE_RESOLVED, (WPARAM)idx, 0);
     return S_OK;
 }
 
@@ -1194,8 +1403,15 @@ BOOL WINAPI DllMain(HINSTANCE dll, DWORD reason, void *reserved)
         InitializeCriticalSection(&loglock);
         tls_hwnd = TlsAlloc();
         load_config();
-        logmsg("loaded: name=\"%s\" serial=%s port=%d power=%dW bpm=%d",
-               cfg_name, cfg_serial, cfg_port, cfg_power, cfg_bpm);
+        {
+            char caps[64];
+            int i;
+            for (i = 0; i < ndevs; i++)
+                logmsg("loaded: name=\"%s\" serial=%s port=%d caps=%s power=%dW bpm=%d%s",
+                       devs[i].name, devs[i].serial, devs[i].port,
+                       caps_str(devs[i].caps, caps, sizeof caps),
+                       devs[i].power, devs[i].bpm, devs[i].external ? " (served elsewhere)" : "");
+        }
     }
     return TRUE;
 }

@@ -170,12 +170,14 @@ file and stops loading it if anything changed.
 
 At launch the prefix needs:
   LD_PRELOAD=$PREFIX/dotlocal_shim.so
-and, for a hard-coded test sensor rather than real hardware:
+and, for hard-coded test sensors rather than real hardware:
   FAKESENSOR_NAME / FAKESENSOR_POWER / FAKESENSOR_BPM
+  FAKESENSOR_HR=1  adds a fake heart-rate strap beside the fake trainer
 
-For a real trainer, run this on the Linux side and set FAKESENSOR_EXTERNAL=1:
+For real hardware, run this on the Linux side and set FAKESENSOR_EXTERNAL=1:
   fakesensor/blebridge.py --list
   fakesensor/blebridge.py --mac <address>
+  fakesensor/blebridge.py --mac <address> --hr-mac <strap address>
 
 Check what landed at any time with:
   $0 --verify $PREFIX

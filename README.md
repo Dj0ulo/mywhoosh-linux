@@ -82,7 +82,7 @@ devices to the desktop client over the local network.
 - **Android:** [MyWhoosh Link on Google Play](https://play.google.com/store/apps/details?id=com.whoosh.companion)
 - **iOS:** [MyWhoosh Link on the App Store](https://apps.apple.com/be/app/mywhoosh-link/id1561724525)
 
-### Connecting a trainer without the phone
+### Connecting a trainer and a heart-rate strap without the phone
 
 With the **connectivity installer**, `fakesensor/blebridge.py` does the
 companion app's job from Linux instead: it connects to a Bluetooth LE trainer
@@ -90,20 +90,34 @@ through BlueZ and serves it to the game over Wahoo Direct Connect, so the
 trainer shows up on MyWhoosh's own device screen with its real name, power and
 cadence. Measured working on a Tacx Flux, resistance control included.
 
+A heart-rate strap is paired in the game's second slot after the trainer, and
+`--hr-mac` serves it alongside — on the trainer's own socket, because MyWhoosh
+holds one Direct Connect connection at a time and fills a second slot by
+matching serials against the sensor it already has:
+
 ```bash
-fakesensor/blebridge.py --list                  # find your trainer
-fakesensor/blebridge.py --mac AA:BB:CC:DD:EE:FF # serve it
+fakesensor/blebridge.py --list                  # find your devices
+fakesensor/blebridge.py --mac AA:BB:CC:DD:EE:FF # serve the trainer
+fakesensor/blebridge.py --mac AA:BB:CC:DD:EE:FF --hr-mac 11:22:33:44:55:66
 ```
 
-Start it before the game; nothing has to be configured per trainer. It hands
-the DLL the device's name, serial and port through a file in the prefix, so the
-trainer comes up under its own name and its own device id. Without a bridge
-running, the prefix serves one hard-coded sensor (`FAKESENSOR_NAME` /
-`FAKESENSOR_POWER` / `FAKESENSOR_BPM`), which is enough to check that the path
-works.
+Then search for a heart-rate monitor on the same device screen and pair the
+strap; MyWhoosh shows its bpm while the trainer keeps reporting watts. The game
+would not normally offer a Direct Connect sensor for that slot at all — it
+expects straps over Bluetooth, which does not work under Wine — so the export
+shim asks for the scan list on the game's behalf and labels it for the slot
+being searched. `exportshim/README.md` has the detail.
 
-Still experimental: one trainer and one connection at a time, and BlueZ has to
-be able to reach the device — see `fakesensor/README.md`.
+Start it before the game; nothing has to be configured per device. It hands the
+DLL each one's name, serial, port and capabilities through a file in the prefix,
+so each comes up under its own name and neither is offered for a slot it cannot
+fill. Without a bridge running, the prefix serves one
+hard-coded sensor (`FAKESENSOR_NAME` / `FAKESENSOR_POWER` / `FAKESENSOR_BPM`,
+plus `FAKESENSOR_HR=1` for a fake strap next to it), which is enough to check
+that the path works.
+
+Still experimental: one connection per device at a time, and BlueZ has to be
+able to reach them — see `fakesensor/README.md`.
 
 ---
 
