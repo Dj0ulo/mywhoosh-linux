@@ -53,6 +53,11 @@ Knobs, all read from the environment by the DLL: `FAKESENSOR_NAME`,
 `FAKESENSOR_MAC`, `FAKESENSOR_PORT`, `FAKESENSOR_POWER`, `FAKESENSOR_BPM`,
 `FAKESENSOR_ADDR` (what `*.local` resolves to), `FAKESENSOR_LOG`.
 
+The name, serial, MAC and port can also come from `C:\fakesensor-device`, a
+`key=value` file the DLL reads at load time. `blebridge.py` writes it, which is
+what keeps a real trainer's identity out of the game's environment; it wins over
+the variables above and implies `FAKESENSOR_EXTERNAL`.
+
 The sensor advertises Cycling Power (`0x1818` / `0x2a63`) and Heart Rate
 (`0x180d` / `0x2a37`), both notify-only, and pushes a measurement on each once a
 second.
@@ -85,14 +90,17 @@ work, because the trainer does send crank data.
 ```sh
 ./blebridge.py --list                       # scan, print candidates
 ./blebridge.py --mac FA:55:E5:BE:21:A5 &    # or no --mac: first fitness device seen
-FAKESENSOR_EXTERNAL=1 FAKESENSOR_NAME="Tacx Flux 06189" FAKESENSOR_SERIAL=6189 \
-    ./run.sh 10 45
+./run.sh 10 45
 ```
 
-`FAKESENSOR_EXTERNAL=1` stops the DLL binding the port itself, so it only
-advertises the one the bridge already serves. `FAKESENSOR_NAME` should be the
-device's real name -- the host name the game resolves is derived from it -- and
-`FAKESENSOR_SERIAL` has to stay digits, since the game parses it as a `UInt64`.
+Nothing about the trainer is configured here. On connect the bridge writes the
+device's name, serial, address and port to `<prefix>/drive_c/fakesensor-device`,
+and the DLL picks all four up when the game loads it; the serial is derived from
+the address, and the host name the game resolves is derived from the name. The
+file's presence also stops the DLL binding the port itself, so it only
+advertises the one the bridge already serves — what `FAKESENSOR_EXTERNAL=1` did
+by hand. The bridge removes it on exit, and `--no-handshake` goes back to the
+variables.
 
 Two things this proves beyond the readings:
 
@@ -186,8 +194,8 @@ Two things this turned up, neither in this stack:
   Dircon serial and then displays the *stored* name, so a trainer advertised on
   fakebonjour's default serial comes up under whatever name last used it --
   observed, as a real Tacx reporting live watts while labelled `FakeTrainer`.
-  `blebridge.py` now prints a `FAKESENSOR_SERIAL` derived from the device
-  address; pass it along with `FAKESENSOR_NAME`.
+  `blebridge.py` derives a serial from the device address and hands it to the
+  DLL through the handshake file, so every trainer is its own device.
 - **A device the game already knows does not appear in a scan.** With the
   pairing saved, the game auto-connects on startup and `Browse`/`Resolve` keep
   firing while `WD_GetScannedDevicesList` returns 0, so the search list looks

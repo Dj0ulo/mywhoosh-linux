@@ -95,10 +95,12 @@ fakesensor/blebridge.py --list                  # find your trainer
 fakesensor/blebridge.py --mac AA:BB:CC:DD:EE:FF # serve it
 ```
 
-It prints the `FAKESENSOR_NAME` and `FAKESENSOR_SERIAL` to add to the game's
-environment next to `FAKESENSOR_EXTERNAL=1`. Without a bridge running, the
-prefix serves one hard-coded sensor (`FAKESENSOR_NAME` / `FAKESENSOR_POWER` /
-`FAKESENSOR_BPM`), which is enough to check that the path works.
+Start it before the game; nothing has to be configured per trainer. It hands
+the DLL the device's name, serial and port through a file in the prefix, so the
+trainer comes up under its own name and its own device id. Without a bridge
+running, the prefix serves one hard-coded sensor (`FAKESENSOR_NAME` /
+`FAKESENSOR_POWER` / `FAKESENSOR_BPM`), which is enough to check that the path
+works.
 
 Still experimental: one trainer and one connection at a time, and BlueZ has to
 be able to reach the device — see `fakesensor/README.md`.

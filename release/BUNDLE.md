@@ -46,9 +46,10 @@ fakesensor/blebridge.py --list
 fakesensor/blebridge.py --mac AA:BB:CC:DD:EE:FF
 ```
 
-It prints the `FAKESENSOR_NAME` and `FAKESENSOR_SERIAL` to launch the game with,
-next to `FAKESENSOR_EXTERNAL=1`. Without a bridge the prefix serves one
-hard-coded sensor instead (`FAKESENSOR_NAME` / `FAKESENSOR_POWER` /
-`FAKESENSOR_BPM`), which is enough to see the whole path work.
+Start it before the game and there is nothing to configure: it writes your
+trainer's name, serial and port into the prefix, and the DLL reads them when the
+game loads it. Without a bridge the prefix serves one hard-coded sensor instead
+(`FAKESENSOR_NAME` / `FAKESENSOR_POWER` / `FAKESENSOR_BPM`), which is enough to
+see the whole path work.
 
 Source and the full write-up: https://github.com/Dj0ulo/mywhoosh-linux

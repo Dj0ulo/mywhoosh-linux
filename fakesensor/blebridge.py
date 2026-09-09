@@ -26,16 +26,20 @@ Usage:
     ./blebridge.py --mac FA:55:E5:BE:21:A5 --port 36866
     ./blebridge.py --list               # scan and print candidates, then exit
 
-Then, in the prefix that has fakebonjour installed:
-    FAKESENSOR_EXTERNAL=1 ./run.sh 12 20
-which stops the DLL from binding the port itself and lets it advertise this one.
-On startup this prints the FAKESENSOR_NAME/SERIAL to advertise it under; pass
-them both, or the game keys its saved pairing on the default serial and shows
-the previous sensor's name for your trainer.
+Start this before the game: on connect it writes the trainer's name, serial,
+address and port into <prefix>/drive_c/fakesensor-device, which fakebonjour
+reads when the game loads it, so nothing has to be configured per trainer.  The
+file also tells the DLL not to bind the Dircon port itself, and is removed on
+exit.  Pass --prefix if the prefix cannot be guessed, or --no-handshake to go
+back to advertising through FAKESENSOR_NAME/SERIAL/PORT in the game's
+environment (printed on startup in that case).
 """
 
 import argparse
+import atexit
 import errno
+import glob
+import os
 import socket
 import struct
 import time
@@ -138,6 +142,73 @@ RC_OK, RC_UNEXPECTED, RC_UNKNOWN_SERVICE, RC_UNKNOWN_CHAR, RC_UNSUPPORTED = 0, 1
 def log(fmt, *a):
     sys.stderr.write("bridge: " + (fmt % a if a else fmt) + "\n")
     sys.stderr.flush()
+
+
+# The DLL reads its advertised identity from this file, inside the prefix, at
+# load time; see ../fakesensor/fakebonjour.c (HANDSHAKE_PATH).  Writing it here
+# is what spares a user from having to put their own trainer's name, serial and
+# MAC into the environment of whatever launches the game: the bridge knows all
+# three the moment it connects, and the game is started afterwards.
+HANDSHAKE = "fakesensor-device"
+
+
+def find_prefix():
+    """A Wine prefix with fakebonjour installed, or None if we cannot tell.
+
+    Preferring the marker the installer leaves (dotlocal_shim.so) over any
+    directory that merely looks like a prefix keeps this from picking one of the
+    user's other games.
+    """
+    if os.environ.get("WINEPREFIX"):
+        return os.environ["WINEPREFIX"]
+    seen, found = set(), []
+    cands = []
+    for yml in glob.glob(os.path.expanduser("~/.config/lutris/games/*.yml")):
+        try:
+            for line in open(yml):
+                line = line.strip()
+                if line.startswith("prefix:"):
+                    cands.append(os.path.expanduser(line.split(":", 1)[1].strip()))
+        except OSError:
+            pass
+    cands += sorted(glob.glob(os.path.expanduser("~/Games/*/")))
+    for c in cands:
+        c = c.rstrip("/")
+        if c in seen:
+            continue
+        seen.add(c)
+        if os.path.exists(os.path.join(c, "dotlocal_shim.so")):
+            found.append(c)
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        log("no prefix with fakebonjour installed found; pass --prefix to write "
+            "the handshake, or set FAKESENSOR_* in the game's environment")
+    else:
+        log("several prefixes have fakebonjour installed, pass --prefix to pick one:")
+        for f in found:
+            log("    --prefix %s", f)
+    return None
+
+
+def write_handshake(prefix, name, serial, mac, port):
+    """Hand the DLL this trainer's identity, and take it back on the way out."""
+    path = os.path.join(prefix, "drive_c", HANDSHAKE)
+    body = "name=%s\nserial=%d\nmac=%s\nport=%d\n" % (name, serial, mac, port)
+    try:
+        with open(path, "w") as f:
+            f.write(body)
+    except OSError as e:
+        log("cannot write %s: %s", path, e)
+        return
+    log("handshake %s: name=%s serial=%d port=%d", path, name, serial, port)
+
+    def clean():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    atexit.register(clean)
 
 
 def dircon_props(flags):
@@ -565,6 +636,11 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="address to listen on")
     ap.add_argument("--all", action="store_true", dest="expose_all",
                     help="expose every GATT service, not just the fitness ones")
+    ap.add_argument("--prefix", help="Wine prefix to write the handshake file into; "
+                    "default is $WINEPREFIX, else the one prefix that has "
+                    "fakebonjour installed")
+    ap.add_argument("--no-handshake", action="store_true",
+                    help="do not write the handshake file (advertise via FAKESENSOR_* instead)")
     ap.add_argument("--list", action="store_true", help="scan, print candidates, exit")
     args = ap.parse_args()
 
@@ -589,8 +665,13 @@ def main():
     # treat it as already known, which keeps it out of the scan results.
     # Derive one from the address so every trainer is its own device.
     serial = int(b.mac.replace(":", ""), 16)
-    log("advertise this as: FAKESENSOR_NAME=%r FAKESENSOR_SERIAL=%d FAKESENSOR_PORT=%d",
-        name.replace(" ", "-"), serial, args.port)
+    name = name.replace(" ", "-")
+    prefix = None if args.no_handshake else (args.prefix or find_prefix())
+    if prefix:
+        write_handshake(prefix, name, serial, b.mac, args.port)
+    else:
+        log("advertise this as: FAKESENSOR_NAME=%r FAKESENSOR_SERIAL=%d FAKESENSOR_PORT=%d",
+            name, serial, args.port)
     try:
         GLib.MainLoop().run()
     except KeyboardInterrupt:

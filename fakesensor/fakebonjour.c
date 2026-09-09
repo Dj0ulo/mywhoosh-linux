@@ -40,6 +40,10 @@
  *   FAKESENSOR_EXTERNAL  1 = do not serve Dircon ourselves; something else
  *                        already listens on FAKESENSOR_PORT (blebridge.py)
  *   FAKESENSOR_LOG     log file; otherwise stderr
+ *
+ * C:\\fakesensor-device, if it exists, overrides name/serial/mac/port from the
+ * environment and implies FAKESENSOR_EXTERNAL -- blebridge.py writes it for the
+ * trainer it has actually connected to.  See load_handshake.
  */
 
 #include <winsock2.h>
@@ -94,6 +98,50 @@ static void env_int(const char *name, int *out)
     if (v && *v) *out = atoi(v);
 }
 
+/* blebridge.py writes this when it has a real trainer on the wire.  The DLL
+ * runs inside the game and the bridge is a separate Linux process, so there is
+ * no other channel between them in time: the name and serial have to be known
+ * before the discovery answer goes out, which is long before anything connects
+ * to the Dircon socket.
+ *
+ * It wins over the environment on purpose.  The env vars are static defaults --
+ * the Lutris installer sets FakeTrainer/150W in them -- while this file is
+ * written by a bridge that is running right now and knows what is actually
+ * attached.  Its presence also implies FAKESENSOR_EXTERNAL: whoever wrote it is
+ * serving the socket. */
+#define HANDSHAKE_PATH "C:\\fakesensor-device"
+
+static void load_handshake(void)
+{
+    char line[256];
+    FILE *f = fopen(HANDSHAKE_PATH, "r");
+    if (!f)
+        return;
+
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        char *key = line, *val;
+        size_t n;
+        if (!eq)
+            continue;
+        *eq = 0;
+        val = eq + 1;
+        n = strlen(val);
+        while (n && (val[n - 1] == '\n' || val[n - 1] == '\r' || val[n - 1] == ' '))
+            val[--n] = 0;
+        if (!n)
+            continue;
+        if (!strcmp(key, "name"))        { strncpy(cfg_name, val, sizeof cfg_name - 1); cfg_name[sizeof cfg_name - 1] = 0; }
+        else if (!strcmp(key, "serial")) { strncpy(cfg_serial, val, sizeof cfg_serial - 1); cfg_serial[sizeof cfg_serial - 1] = 0; }
+        else if (!strcmp(key, "mac"))    { strncpy(cfg_mac, val, sizeof cfg_mac - 1); cfg_mac[sizeof cfg_mac - 1] = 0; }
+        else if (!strcmp(key, "port"))   cfg_port = atoi(val);
+    }
+    fclose(f);
+    cfg_external = 1;
+    logmsg("handshake %s: name=\"%s\" serial=%s mac=%s port=%d",
+           HANDSHAKE_PATH, cfg_name, cfg_serial, cfg_mac, cfg_port);
+}
+
 static void load_config(void)
 {
     const char *path = getenv("FAKESENSOR_LOG");
@@ -110,6 +158,7 @@ static void load_config(void)
     env_int("FAKESENSOR_BPM", &cfg_bpm);
     env_int("FAKESENSOR_SINKBASE", &cfg_sink_base);
     env_int("FAKESENSOR_EXTERNAL", &cfg_external);
+    load_handshake();
 }
 
 /* -------------------------------------------------------------------- GUIDs */

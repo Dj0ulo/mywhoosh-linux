@@ -19,8 +19,8 @@ description: |
   is the only requirement.
 
   To connect a real Bluetooth trainer, run fakesensor/blebridge.py from the
-  same bundle on the Linux side and add FAKESENSOR_EXTERNAL=1 to the game's
-  environment; it prints the FAKESENSOR_NAME and FAKESENSOR_SERIAL to use.
+  same bundle on the Linux side before starting the game; it passes the
+  trainer's identity to the game itself, so there is nothing to configure.
   Without it the prefix serves one hard-coded sensor, which is what the
   FAKESENSOR_NAME/POWER/BPM variables below configure.
 
@@ -42,8 +42,8 @@ script:
     env:
       # Wine cannot resolve the .local name the game gets back from discovery.
       LD_PRELOAD: $GAMEDIR/dotlocal_shim.so
-      # The hard-coded sensor.  Set FAKESENSOR_EXTERNAL=1 to use blebridge.py
-      # against real hardware instead.
+      # The hard-coded sensor, used when no blebridge.py is running; a bridge
+      # overrides all of this through <prefix>/drive_c/fakesensor-device.
       FAKESENSOR_NAME: FakeTrainer
       FAKESENSOR_POWER: '150'
       FAKESENSOR_BPM: '75'
