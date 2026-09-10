@@ -54,6 +54,14 @@ Bluetooth and ANT+ are **not currently supported** directly from Wine. To connec
 
 The companion app bridges your fitness devices to the desktop client over your local network.
 
+### Bluetooth directly from Linux (work in progress)
+
+`bleshim/` connects your trainer and heart-rate strap to MyWhoosh over your
+computer's own Bluetooth adapter, with no phone involved. It works — a smart
+trainer and a strap pair in the game and stream — but it is not packaged into
+the Lutris installer yet, so setting it up is still a manual sequence. See
+[`bleshim/README.md`](bleshim/README.md).
+
 ---
 
 ## How it works
