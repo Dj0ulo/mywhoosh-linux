@@ -228,6 +228,16 @@ things that can only be checked that way:
   out of an existing prefix, which is equivalent for everything named but is
   not the same as a clean install.
 
+**The Flatpak path is reasoned, not ridden.** Flatpak Lutris gets no
+`--socket=system-bus` and no `--system-talk-name=org.bluez`, so
+`../lutris/mywhoosh-ble.sh` routes the probes and the helper through
+`flatpak-spawn --host` when `/.flatpak-info` exists, and starts the helper with
+`--watch-bus` so killing the `flatpak-spawn` in the pidfile takes the host
+process with it.  That was exercised against a stand-in `flatpak-spawn`, which
+proves the plumbing and the argument quoting but not the two things only a real
+sandbox shows: whether `--watch-bus` really reaps the helper on `stop`, and
+whether the portal's idea of the game directory matches the sandbox's.
+
 **`dist/` is a second copy of the build.** The installer downloads the
 assemblies from there by raw URL, so they must be rebuilt and committed with
 `../dist.sh` whenever `src/` or `../exportshim/` changes. Nothing enforces it;

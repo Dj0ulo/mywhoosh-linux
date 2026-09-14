@@ -14,17 +14,16 @@ MyWhoosh is officially available on Windows, macOS, iOS, and Android — but **n
 - [Lutris](https://lutris.net/downloads/) installed
 - [Python 3](https://www.python.org/) installed (`python3`)
 
-For Bluetooth sensors (trainer, heart-rate strap), also:
+For Bluetooth sensors (trainer, heart-rate strap), also a working BlueZ — if
+`bluetoothctl scan on` shows your trainer when you pedal, you are fine.
 
-- A working BlueZ — if `bluetoothctl scan on` shows your trainer when you
-  pedal, you are fine
-- `dbus-python` and `PyGObject` for Python 3:
-
-  | | |
-  |---|---|
-  | Debian/Ubuntu | `sudo apt install python3-dbus python3-gi` |
-  | Fedora | `sudo dnf install python3-dbus python3-gobject` |
-  | Arch | `sudo pacman -S python-dbus python-gobject` |
+The helper needs Python's `dbus-python` and `PyGObject`, which you almost
+certainly already have: a distro package of Lutris depends on both. The
+exception is **Flatpak Lutris**, whose sandbox cannot reach BlueZ at all — the
+helper is then run on the host through `flatpak-spawn`, and the host needs
+those two packages (`python3-dbus` and `python3-gi` on Debian/Ubuntu,
+`python3-dbus` and `python3-gobject` on Fedora, `python-dbus` and
+`python-gobject` on Arch).
 
 The installer checks all of this at the end and tells you what is missing.
 

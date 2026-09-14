@@ -49,6 +49,39 @@ the game from launching, and a problem at install time must not throw away a
 finished download; it says what is wrong (in the log, and through `notify-send`
 when there is a desktop to say it to) and gets out of the way.
 
+## Flatpak Lutris
+
+The sandbox is no place to reach Bluetooth from. The Flathub manifest grants no
+`--socket=system-bus` and no `--system-talk-name=org.bluez`, so inside it BlueZ
+is not merely unauthorised — it is absent, and a helper started there would
+report no adapter no matter what is installed.
+
+Two other permissions it *does* grant make that a detour rather than a wall:
+
+| Permission | What it buys |
+|---|---|
+| `--talk-name=org.freedesktop.Flatpak` | `flatpak-spawn --host` works, so the helper runs on the host, with the host's `python3` and the host's system bus |
+| `--share=network` | the host's loopback is the same loopback the shim inside Wine dials, so nothing about the protocol changes |
+
+So `mywhoosh-ble.sh` checks for `/.flatpak-info` and, when it finds one, routes
+every command that wants Linux rather than the sandbox — the dependency probes,
+the BlueZ probe, `notify-send`, and the helper itself — through
+`flatpak-spawn --host`. The helper is started with `--watch-bus` so it dies with
+the `flatpak-spawn` that carries it: that process is what the pidfile holds, and
+killing it is the only handle `stop` has on a process in another namespace.
+
+Game files are under `~/Games`, which the manifest maps at its real path, so the
+helper's path is valid on the host as written.
+
+Two consequences worth knowing:
+
+- The *host* is what needs `dbus-python` and `PyGObject`. A distro package of
+  Lutris depends on both, so a native install is always ready; a Flatpak pulls
+  in neither, and the host may genuinely lack them. `check` says so, with the
+  command for each distro.
+- With `flatpak-spawn` missing from the sandbox there is no way out at all, and
+  `check` says that instead of blaming BlueZ.
+
 Two environment variables, settable in Lutris under *Configure → System options
 → Environment variables*:
 

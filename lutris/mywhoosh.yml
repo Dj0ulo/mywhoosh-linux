@@ -10,15 +10,14 @@ description: |
   own Bluetooth adapter. Lutris starts the Linux-side Bluetooth helper with the
   game and stops it when you quit.
 
-  Before installing, make sure Bluetooth works on your machine
-  (`bluetoothctl scan on` should show your trainer when you pedal) and that
-  these packages are present:
+  Before installing, make sure Bluetooth works on your machine:
+  `bluetoothctl scan on` should show your trainer when you pedal.
 
-    Debian/Ubuntu:  sudo apt install python3-dbus python3-gi
-    Fedora:         sudo dnf install python3-dbus python3-gobject
-    Arch:           sudo pacman -S python-dbus python-gobject
-
-  The last step of the install checks all of this and tells you what is missing.
+  The Python packages the helper needs come with a distro package of Lutris, so
+  they are almost certainly already installed. If you run Lutris as a Flatpak,
+  the helper runs on your host instead, and your host needs python3-dbus and
+  python3-gi (python-dbus / python-gobject on Arch). The last step of the
+  install checks all of this and tells you what is missing.
   If you would rather bridge your sensors from a phone instead, the MyWhoosh
   Link companion app still works:
    - Android: https://play.google.com/store/apps/details?id=com.whoosh.companion

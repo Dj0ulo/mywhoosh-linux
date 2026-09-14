@@ -140,6 +140,7 @@ And one thing the prefix must **not** have:
 | The game reports Bluetooth off | The helper is not reachable, or the adapter is off (`bluetoothctl power on`) |
 | Game exits at startup with `COMException` | A `"Bonjour Service"` is running in the prefix, so the game took the Bonjour path. `./install.sh --verify`, then `--close-gate` |
 | The device list crashes on first poll | `../exportshim/` is not installed |
+| Lutris is a Flatpak and there is no adapter | The sandbox cannot reach BlueZ; the helper is run on the host instead, and the host needs `dbus-python` and `PyGObject`. `../lutris/README.md` has the detail |
 
 The log is the diagnostic tool. Every layer writes to it with its own tag —
 `[blehelper]`, `[bleshim]`, `[exportshim]` — so you can see how far a request
