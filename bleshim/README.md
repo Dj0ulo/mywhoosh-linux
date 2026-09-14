@@ -13,8 +13,10 @@ screen and streams power and cadence; a heart-rate strap pairs beside it.
 **Status: working.** Measured on 2026-09-11 with MyWhoosh 6.1.2 under
 GE-Proton10-4: the game discovers a Tacx Flux and a heart-rate strap, connects
 to both at once, subscribes to Cycling Power, Indoor Bike Data, FTMS Status,
-FTMS Control Point and Heart Rate Measurement, and rides. Not packaged yet —
-installing it is still the manual sequence below.
+FTMS Control Point and Heart Rate Measurement, and rides. Re-measured on
+2026-09-14 in a prefix with no Bonjour of any kind and stock wine-mono, which is
+what this branch now asks for. Not packaged yet — installing it is still the
+manual sequence below.
 
 ## Quick start
 
@@ -26,6 +28,7 @@ to build, and a Wine prefix with MyWhoosh already installed.
 ./build.sh                                   # two .NET assemblies into build/
 WINEPREFIX=<prefix> ./install.sh             # copy them into the prefix
 WINEPREFIX=<prefix> ../exportshim/install.sh # and this one, see below
+WINEPREFIX=<prefix> ./install.sh --verify    # ... and check the Bonjour gate is shut
 ./run.sh                                     # start the helper + the game
 ```
 
@@ -101,18 +104,25 @@ blehelper.py  ──►  BlueZ (D-Bus)  ──►  your Bluetooth adapter
 
 ## What else the prefix needs
 
-Two things this directory does not provide, which the game nevertheless
-requires:
-
-- **A Bonjour COM server.** At startup the game creates Apple Bonjour's COM
-  objects unconditionally, and a failure there is fatal — it dies with a
-  `COMException` out of `OpenBikeManager.OBM_Initialize` before Bluetooth is
-  ever reached. Bonjour has nothing to do with BLE; the object merely has to
-  exist. The `dev` branch's `fakesensor/fakebonjour.c` is one, and with
-  `FAKESENSOR_NONE=1` it advertises nothing, which is what you want here. There
-  is no minimal stub of our own yet — see `CLAUDE.md`.
 - **wine-mono installed into the prefix** (not Wine's shared copy), because
-  `install.sh` writes into that tree.
+  `install.sh` writes into that tree. The runner's stock build is fine; nothing
+  here needs the patched runtime the `dev` branch installs.
+
+And one thing the prefix must **not** have:
+
+- **A running `"Bonjour Service"`.** The game only touches Apple Bonjour's COM
+  objects when the SCM reports a service by exactly that name in state
+  `Running`; `OpenBikeManager::OBM_Initialize` and `WahooProgram::.ctor` both
+  test it first and skip their initialisers when it is false. With no such
+  service the Bonjour path is never entered, and this branch needs no COM server
+  at all. With one, the game demands Apple's COM objects and dies with a
+  `COMException` out of `OBM_Initialize` if they are missing — before Bluetooth
+  is ever reached.
+
+  A prefix that has run the `dev` branch has that service installed on purpose,
+  since Direct Connect needs everything behind the gate. `./install.sh --verify`
+  says which state a prefix is in, and `./install.sh --close-gate` removes
+  `dev`'s stub. `CLAUDE.md` has the IL.
 
 ## When it does not work
 
@@ -122,7 +132,7 @@ requires:
 | `scanning` but your trainer never appears | It is asleep. Pedal. Confirm with `./blehelper.py --list` |
 | `advertises no service UUIDs; the game will ignore it` | Normal for phones and watches. The game only shows devices advertising a fitness service |
 | The game reports Bluetooth off | The helper is not reachable, or the adapter is off (`bluetoothctl power on`) |
-| Game exits at startup with `COMException` | No Bonjour COM server in the prefix — see above |
+| Game exits at startup with `COMException` | A `"Bonjour Service"` is running in the prefix, so the game took the Bonjour path. `./install.sh --verify`, then `--close-gate` |
 | The device list crashes on first poll | `../exportshim/` is not installed |
 
 The log is the diagnostic tool. Every layer writes to it with its own tag —

@@ -156,36 +156,61 @@ Newline-delimited JSON on `127.0.0.1:27019`, one client at a time.
 Deliberately dumb and transport-agnostic: the helper can later move in-process,
 or be replaced by Wine's own API, without `src/Windows.cs` noticing.
 
-## Open
+## The Bonjour gate
 
-**A Bonjour COM server is still required, and this branch does not ship one.**
-The game creates Bonjour's COM objects at startup unconditionally and dies on a
-`COMException` from `OpenBikeManager.OBM_Initialize` if `CoCreateInstance`
-fails — nothing to do with Bluetooth; the object merely has to exist. Today that
-is met by the `dev` branch's `fakesensor/fakebonjour.c`, which is 1400 lines of
-COM plus a Dircon TCP server we have no use for. What it needs is the switch
-below, currently applied only to a local build. Either port that patch to `dev`,
-or — better — write a small COM server here that answers `CoCreateInstance`,
-browses nothing, and is 300 lines instead of 1400.
+This branch needs no Bonjour COM server and no patched wine-mono, and the reason
+is one branch in the game's own IL rather than anything the shim does.
 
-```c
-/* in load_config(), after the cfg_hr block */
-{ const char *v = getenv("FAKESENSOR_NONE"); if (v && *v && *v != '0') ndevs = 0; }
+`OpenBikeManager::GetNetworkState` and `WahooProgram::GetNetworkState` are the
+same method twice: walk `ServiceController.GetServices()`, look for a service
+named exactly `"Bonjour Service"`, return true only if its `Status` is `4`
+(`Running`). Each constructor stores that in `isBonjourEnabled`, and the two
+places that touch COM branch over themselves when it is false:
 
-/* at the top of shim_kick(): the BLE shim's own Loader does this job now,
-   and doing it twice would hide whether that works */
-env = getenv("FAKESENSOR_NONE");
-if (env && *env && *env != '0') {
-    logmsg("export shim: leaving it to the BLE shim (FAKESENSOR_NONE)");
-    return;
-}
+```
+OpenBikeManager::OBM_Initialize   IL_0001 ldfld isBonjourEnabled
+                                  IL_0006 brfalse IL_0100      <- the ret
+WahooProgram::.ctor               IL_0063 ldfld isBonjourEnabled
+                                  IL_0068 brfalse.s IL_0070    <- past WFTNP_Init
 ```
 
-**Whether the patched wine-mono (`winemono/` on `dev`) can be dropped.**
-`ComAwareEventInfo` does not appear anywhere in `BluetoothProgram` or
-`BluetoothSensor` (measured, zero hits), so the BLE path should not need it. It
-has not been confirmed, because the prefix used for testing still carries the
-Dircon stack's registrations.
+Those two are the whole of it. Across all 126 types in
+`WindowsConnectivity.dll` there are exactly four `Marshal::GetTypeFromCLSID`
+call sites and twelve `ComAwareEventInfo::.ctor` sites, and every one of them is
+inside `OBM_Initialize`, `WFTNP_Init` or `WFTNP_Dispose` — all three behind the
+gate. Nothing else in the assembly reaches Bonjour at all.
+
+So with no `"Bonjour Service"` running:
+
+- `CoCreateInstance` is never called, so the `COMException` out of
+  `OBM_Initialize` cannot happen and no COM server has to exist;
+- `ComAwareEventInfo` is never constructed, so it does not matter that stock
+  wine-mono leaves all of it as `NotImplementedException` — which is the entire
+  reason `dev` carries `winemono/`;
+- `WD_GetDirconServiceAvailability` returns false and the game simply does not
+  offer Direct Connect, which on this branch is correct.
+
+The trap is the other direction. A prefix that has run the `dev` branch has the
+gate **propped open on purpose** — `fakesensor/install.sh` installs a
+`"Bonjour Service"` stub, because everything Direct Connect needs lives behind
+it. In such a prefix this branch does appear to require a Bonjour COM server and
+a patched runtime, and that appearance is entirely an artefact of the leftover
+service. `./install.sh --verify` reports the gate state, and
+`./install.sh --close-gate` removes `dev`'s stub — only its own, identified by
+the `fakesensor-bonjour-stub` marker; a `"Bonjour Service"` we did not install
+is assumed to be Apple's and left alone.
+
+Measured on 2026-09-14, MyWhoosh 6.1.2 under GE-Proton10-4, in a prefix with no
+`"Bonjour Service"`, neither Bonjour CLSID registered, no `fakebonjour.dll`, and
+**stock** `System.Core.dll` from the runner's wine-mono: the game starts, reaches
+`hooked 4/4 exports`, connects to the helper, and auto-connects a Tacx Flux,
+subscribing to `2a63`, `2ad2`, `2ada` and `2ad9` with the game reporting three
+connected devices. No `COMException`, no `NotImplementedException`.
+
+## Open
 
 **Packaging.** `install.sh` at the repository root, the Lutris installer and the
-release bundle all describe the Dircon stack.
+release bundle all describe the Dircon stack. A prefix built by this branch
+alone has never been made from scratch — the measurement above was made by
+stripping the Dircon stack out of the existing test prefix, which is equivalent
+for everything named but is not the same as a clean install.

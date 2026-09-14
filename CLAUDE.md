@@ -16,6 +16,13 @@ with far less disguise — no fake Bonjour service, no `.local` resolver preload
 no patched wine-mono, no single-connection workaround for heart-rate straps —
 and as of 2026-09-11 it drives a real trainer and a real strap in the game.
 
+That "no Bonjour, no patched wine-mono" is now measured rather than hoped for:
+the game reaches Apple Bonjour's COM objects, and the `ComAwareEventInfo` that
+stock wine-mono does not implement, only when the SCM reports a service named
+`"Bonjour Service"` Running. Take that service away and both requirements go
+with it. `bleshim/CLAUDE.md` has the IL; the catch is that a prefix which has
+run `dev` has that service installed deliberately.
+
 ## The directories here
 
 | Directory | What it is |
