@@ -209,8 +209,27 @@ connected devices. No `COMException`, no `NotImplementedException`.
 
 ## Open
 
-**Packaging.** `install.sh` at the repository root, the Lutris installer and the
-release bundle all describe the Dircon stack. A prefix built by this branch
-alone has never been made from scratch — the measurement above was made by
-stripping the Dircon stack out of the existing test prefix, which is equivalent
-for everything named but is not the same as a clean install.
+**A clean install has not been measured.** `../lutris/mywhoosh.yml` now installs
+this branch's stack — the three assemblies into the prefix's mono tree,
+`blehelper.py` and `../lutris/mywhoosh-ble.sh` beside the game, and Lutris'
+`prelaunch_command`/`postexit_command` pointed at that script — and no longer
+patches `WindowsConnectivity.dll`. Its file steps were dry-run through Lutris'
+own `CommandsMixin` against a scratch prefix, and the session script was
+exercised for start/stop/already-running/missing-helper. What has *not* been
+done is `lutris -i` on a machine with no prefix, all the way to a ride. Two
+things that can only be checked that way:
+
+- whether the runner's `create_prefix` leaves a wine-mono tree at
+  `drive_c/windows/mono/mono-2.0/lib` for every runner people actually use
+  (it does for the GE-Proton builds here, and `mywhoosh-ble.sh check` reports
+  it when it does not);
+- whether the game, freshly installed and never patched, reaches the sensor
+  screen — the 2026-09-14 measurement was made by stripping the Dircon stack
+  out of an existing prefix, which is equivalent for everything named but is
+  not the same as a clean install.
+
+**`dist/` is a second copy of the build.** The installer downloads the
+assemblies from there by raw URL, so they must be rebuilt and committed with
+`../dist.sh` whenever `src/` or `../exportshim/` changes. Nothing enforces it;
+`dist/MANIFEST` records the commit each build came from, which is the only way
+to notice afterwards.

@@ -1,0 +1,8 @@
+# Built by dist.sh -- do not edit
+date    2026-09-14T21:10:59Z
+commit  f7a40d8
+mcs     Mono C# compiler version 6.8.0.105
+
+bae050180051c49cba35849bda205b3002c88b4c5c70493b78739a79eb3716b3  Windows.dll
+606c18b1766d065b36f598b15546f1b518ef7f3f6ca0bb7a84605560560a2272  System.Runtime.WindowsRuntime.dll
+bcd122aec6234bdec0955d2651ccb3c9d9f2f41271d31641976f85b461e2ffe6  MyWhooshShim.dll

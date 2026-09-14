@@ -31,10 +31,12 @@ run `dev` has that service installed deliberately.
 | `exportshim/` | Replaces four game entry points wine-mono cannot marshal, in memory |
 | `winmd/` | The declaration-only stubs the game needs to start at all — and the "Bluetooth off" state to fall back to |
 | `tools/` | Small programs that read the game's own bytecode; every decision here comes from them |
-| `patch/`, `lutris/` | From `main`: the startup patch and the installer |
+| `lutris/` | The Lutris installer for this branch, and the script that runs the helper beside the game |
+| `dist/` | The built assemblies that installer downloads — rebuild with `dist.sh` |
+| `patch/` | From `main`: the startup patch, which this branch must not apply |
 
-Each of the first four has a `README.md` for orientation. `bleshim/` and
-`exportshim/` also have a `CLAUDE.md` with the engineering detail.
+Every one of these but `patch/` has a `README.md` for orientation. `bleshim/`
+and `exportshim/` also have a `CLAUDE.md` with the engineering detail.
 
 ## Rules that apply everywhere
 

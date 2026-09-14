@@ -3,26 +3,62 @@ game_slug: mywhoosh
 version: Microsoft Store
 description: |
   This installer downloads the MyWhoosh MSIX package from the Microsoft Store,
-  installs it on your machine and applies necessary patches.  
+  installs it into a Wine prefix, and sets up Bluetooth so your smart trainer
+  and heart-rate strap connect straight from Linux — no phone, no companion app.
 
-  IMPORTANT: To connect your smart trainer, heart rate monitor and other devices
-  use the MyWhoosh Link app since Bluetooth and ANT+ are not currently supported
-  directly from Wine. Here are the links to download the companion app:
+  Your trainer pairs in the game's own device screen, through your computer's
+  own Bluetooth adapter. Lutris starts the Linux-side Bluetooth helper with the
+  game and stops it when you quit.
+
+  Before installing, make sure Bluetooth works on your machine
+  (`bluetoothctl scan on` should show your trainer when you pedal) and that
+  these packages are present:
+
+    Debian/Ubuntu:  sudo apt install python3-dbus python3-gi
+    Fedora:         sudo dnf install python3-dbus python3-gobject
+    Arch:           sudo pacman -S python-dbus python-gobject
+
+  The last step of the install checks all of this and tells you what is missing.
+  If you would rather bridge your sensors from a phone instead, the MyWhoosh
+  Link companion app still works:
    - Android: https://play.google.com/store/apps/details?id=com.whoosh.companion
    - iOS: https://apps.apple.com/be/app/mywhoosh-link/id1561724525
 
 slug: mywhoosh-ms-store
 runner: wine
 script:
+  variables:
+    # The branch these are fetched from.  One line to change when this merges.
+    shim_repo: https://raw.githubusercontent.com/Dj0ulo/mywhoosh-linux/bleshim
   files:
     - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms_store_download.py
-    - patch_windows_connectivity_dll: https://raw.githubusercontent.com/Dj0ulo/mywhoosh-linux/main/patch/patch_windows_connectivity_dll.py
+    # The Bluetooth stack: two assemblies the game loads instead of WinRT, the
+    # export shim it needs to poll its device list, the Linux-side BlueZ helper,
+    # and the script Lutris runs to start and stop that helper with the game.
+    - shim_windows: $shim_repo/dist/Windows.dll
+    - shim_winrt: $shim_repo/dist/System.Runtime.WindowsRuntime.dll
+    - shim_exports: $shim_repo/dist/MyWhooshShim.dll
+    - blehelper: $shim_repo/bleshim/blehelper.py
+    - ble_session: $shim_repo/lutris/mywhoosh-ble.sh
   game:
     exe: drive_c/MyWhoosh/MyWhoosh.exe
     prefix: $GAMEDIR
     arch: win64
   wine:
     dxvk: true
+  system:
+    # The game's Bluetooth is answered from inside the prefix, but the hardware
+    # is reached from outside it: BlueZ is on D-Bus, and Wine's winsock has no
+    # AF_UNIX.  So a Linux helper runs alongside the game, and these two lines
+    # are what make that automatic.  prelaunch_wait so the helper is listening
+    # before the game's first scan -- it returns as soon as the port is up.
+    prelaunch_command: $GAMEDIR/bleshim/mywhoosh-ble.sh start
+    prelaunch_wait: true
+    postexit_command: $GAMEDIR/bleshim/mywhoosh-ble.sh stop
+    env:
+      # Every layer -- the helper, the shim inside the prefix, the export
+      # shim -- writes here, so one file explains a ride that found no sensors.
+      MYWHOOSH_SHIM_LOG: $GAMEDIR/bleshim/session.log
   installer:
     - task:
         name: create_prefix
@@ -37,7 +73,34 @@ script:
     - move:
         src: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh.exe
         dst: $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
+    # WindowsConnectivity.dll is deliberately NOT patched: the game hashes it
+    # and silently stops loading it if one byte differs.  What it is missing is
+    # an assembly named `Windows`, which mono resolves by simple name out of the
+    # prefix's own mono tree -- so the shim goes there, and no game file is
+    # touched.  This is also why the mono tree must exist: leave Mono enabled
+    # when creating the prefix.
+    - copy:
+        description: Installing the Bluetooth shim
+        src: shim_windows
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
+    - copy:
+        src: shim_winrt
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
+    - copy:
+        src: shim_exports
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
+    - copy:
+        src: blehelper
+        dst: $GAMEDIR/bleshim
+    - copy:
+        src: ble_session
+        dst: $GAMEDIR/bleshim
+    - chmodx: $GAMEDIR/bleshim/blehelper.py
+    - chmodx: $GAMEDIR/bleshim/mywhoosh-ble.sh
     - execute:
-        description: Patching WindowsConnectivity.dll
-        file: python3
-        args: $patch_windows_connectivity_dll $GAMEDIR/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64/WindowsConnectivity.dll
+        description: Checking the Bluetooth setup
+        file: $GAMEDIR/bleshim/mywhoosh-ble.sh
+        args: check
+        # The helper is a Linux program; the Lutris runtime's library path is
+        # what the system python3 must not be started under.
+        disable_runtime: true

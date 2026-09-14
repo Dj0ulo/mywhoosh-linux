@@ -15,10 +15,16 @@ GE-Proton10-4: the game discovers a Tacx Flux and a heart-rate strap, connects
 to both at once, subscribes to Cycling Power, Indoor Bike Data, FTMS Status,
 FTMS Control Point and Heart Rate Measurement, and rides. Re-measured on
 2026-09-14 in a prefix with no Bonjour of any kind and stock wine-mono, which is
-what this branch now asks for. Not packaged yet — installing it is still the
-manual sequence below.
+what this branch now asks for.
 
-## Quick start
+**Installing it** is one command: `lutris -i ../lutris/mywhoosh.yml` installs the
+game with all of this in place and starts the helper alongside it. See
+`../lutris/README.md`.
+
+## Quick start (by hand)
+
+For a fresh machine, use the Lutris installer instead — it does all of this and
+wires the helper to the game. This is the development loop.
 
 You need Python 3 with `dbus-python` and `PyGObject`, a working BlueZ (if
 `bluetoothctl scan on` shows your trainer, you are fine), Mono's `mcs` compiler
