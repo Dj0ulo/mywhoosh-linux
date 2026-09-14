@@ -176,7 +176,9 @@ namespace Windows.Devices.Bluetooth.Advertisement
     {
         public string LocalName { get { return string.Empty; } }
 
-        public IReadOnlyList<Guid> ServiceUuids { get { return new Guid[0]; } }
+        // IList, not IReadOnlyList: WinRT's IVector<Guid> projects as IList<T>,
+        // and the game's metadata says so.  members.py --check enforces it.
+        public IList<Guid> ServiceUuids { get { return new Guid[0]; } }
     }
 
     public sealed class BluetoothLEAdvertisementReceivedEventArgs

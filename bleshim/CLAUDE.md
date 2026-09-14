@@ -47,10 +47,11 @@ backend moves and nothing above it changes.
 ## What the game actually calls
 
 Read out of the game's IL with `../tools/ildump.sh`, not from WinRT
-documentation. `../winmd/members.py` reports 34 types and 60 members
-referenced; most are plumbing (`DataReader`, `IBuffer` and `CryptographicBuffer`
-are `byte[]` wrappers, `IAsyncOperation<T>` is a `Task<T>`). The real surface is
-about fifteen operations, each one BlueZ call wide:
+documentation. `../winmd/members.py` reports 34 types and 61 members
+referenced, with their signatures; most are plumbing (`DataReader`, `IBuffer`
+and `CryptographicBuffer` are `byte[]` wrappers, `IAsyncOperation<T>` is a
+`Task<T>`). The real surface is about fifteen operations, each one BlueZ call
+wide:
 
 | The game calls | BlueZ |
 |---|---|
@@ -93,14 +94,19 @@ Each of these cost real time. They share a shape: the code is correct on the
 host and wrong in the prefix, or wrong only at runtime.
 
 **Signatures must match the game's metadata exactly, not just by name.**
-`BluetoothLEAdvertisement.ServiceUuids` returning `IReadOnlyList<Guid>` compiles,
-passes `members.py --check`, and then throws `MissingMethodException` on every
-advertisement — the game's metadata says `IList<Guid>`, because WinRT's
-`IVector<T>` projects as `IList<T>`. The failure surfaces inside the game's
-event handler with no device ever appearing, which looks exactly like "the scan
-found nothing". `members.py --check` compares member *names* only; a signature
-comparison is written and working in scratch but not yet folded in — that is the
-single highest-value improvement to make here.
+`BluetoothLEAdvertisement.ServiceUuids` returning `IReadOnlyList<Guid>` compiles
+and then throws `MissingMethodException` on every advertisement — the game's
+metadata says `IList<Guid>`, because WinRT's `IVector<T>` projects as
+`IList<T>`. The failure surfaces inside the game's event handler with no device
+ever appearing, which looks exactly like "the scan found nothing".
+
+`members.py --check` now decodes both sides' signature blobs and compares them,
+so this one is caught at build time rather than in a ride. Run it after every
+change to `src/Windows.cs`:
+
+```sh
+../winmd/members.py <prefix>/…/WindowsConnectivity.dll --check --build-dir build
+```
 
 **BCL types live in different assemblies than on the host.**
 `System.Collections.Generic.Queue<T>` is in `System.dll` on wine-mono's
@@ -183,6 +189,3 @@ Dircon stack's registrations.
 
 **Packaging.** `install.sh` at the repository root, the Lutris installer and the
 release bundle all describe the Dircon stack.
-
-**Signature checking in `members.py`** — see the traps above. It would have
-caught the one real bug this stack has had.

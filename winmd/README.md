@@ -64,23 +64,42 @@ available.
 ## Checking the stubs against the game
 
 `members.py` reads the exact set of types and members out of the game's own
-metadata, so the surface is checked against the game rather than guessed from
-WinRT documentation:
+metadata — with their signatures — so the surface is checked against the game
+rather than guessed from WinRT documentation:
 
 ```sh
 ./members.py <path to>/WindowsConnectivity.dll           # what is referenced
 ./members.py <path to>/WindowsConnectivity.dll --check   # ... and whether build/ has it
 ```
 
+```
+Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisement
+    instance string get_LocalName()
+    instance System.Collections.Generic.IList<System.Guid> get_ServiceUuids()
+```
+
 `build.sh` runs the check automatically when it can find the DLL. The same 34
-types and 60 members cover MyWhoosh 5.7.2, 5.8.2 and 6.1.2 unchanged, so a game
+types and 61 members cover MyWhoosh 5.7.2, 5.8.2 and 6.1.2 unchanged, so a game
 update reaching further into WinRT shows up here as a failed check rather than
 as a crash mid-ride.
 
-**Known gap:** the check compares member *names* only. A member with the right
-name and the wrong signature passes here and throws `MissingMethodException` at
-run time. That has happened once and cost an evening; `../bleshim/CLAUDE.md`
-records it.
+**The signature is checked, not just the name.** A member with the right name
+and the wrong signature is not a member the runtime will bind: it throws
+`MissingMethodException` at the call, which surfaces as the feature quietly not
+working rather than as anything pointing here. That happened once and cost an
+evening — `ServiceUuids` returning `IReadOnlyList<Guid>` where the game's
+metadata says `IList<Guid>`, because WinRT's `IVector<T>` projects as `IList<T>`
+— so both sides' signature blobs are now decoded and compared:
+
+```
+WRONG SIGNATURE Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisement::get_ServiceUuids
+      game wants  instance System.Collections.Generic.IList<System.Guid> get_ServiceUuids()
+      stub has    instance System.Collections.Generic.IReadOnlyList<System.Guid> get_ServiceUuids()
+```
+
+Types are compared by name and shape and not by the assembly they come from,
+because the BCL splits types across different assemblies under wine-mono than on
+the host — the same comparison the runtime makes when it binds a reference.
 
 ## Files
 

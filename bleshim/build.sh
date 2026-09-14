@@ -6,7 +6,7 @@
 # Env overrides: GAME_LIBS (where to find WindowsConnectivity.dll, to check the
 # surface against the game's own metadata).
 #
-# These supersede ../winmd/build/: same assembly names, same 34 types and 60
+# These supersede ../winmd/build/: same assembly names, same 34 types and 61
 # members, answers backed by blehelper.py instead of empty.  Install one or the
 # other into a prefix, never both.
 set -e
@@ -27,8 +27,10 @@ mv -f build/System.Runtime.WindowsRuntimeX.dll build/System.Runtime.WindowsRunti
 GAME_LIBS="${GAME_LIBS:-$HOME/Games/mywhoosh/drive_c/MyWhoosh/MyWhoosh/Binaries/Win64}"
 if [ -f "$GAME_LIBS/WindowsConnectivity.dll" ]; then
     echo
-    # The game's metadata is the contract: anything it references and this does
-    # not implement is a TypeLoadException in the middle of a ride.
+    # The game's metadata is the contract, signatures included: anything it
+    # references and this does not implement is a TypeLoadException in the
+    # middle of a ride, and anything implemented under a different signature is
+    # a MissingMethodException that reads as the sensor simply not being there.
     ../winmd/members.py "$GAME_LIBS/WindowsConnectivity.dll" --check --build-dir build
 else
     echo
