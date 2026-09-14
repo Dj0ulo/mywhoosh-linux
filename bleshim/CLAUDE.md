@@ -238,8 +238,10 @@ proves the plumbing and the argument quoting but not the two things only a real
 sandbox shows: whether `--watch-bus` really reaps the helper on `stop`, and
 whether the portal's idea of the game directory matches the sandbox's.
 
-**`dist/` is a second copy of the build.** The installer downloads the
-assemblies from there by raw URL, so they must be rebuilt and committed with
-`../dist.sh` whenever `src/` or `../exportshim/` changes. Nothing enforces it;
-`dist/MANIFEST` records the commit each build came from, which is the only way
-to notice afterwards.
+**Users install a release, not this tree.** `../dist.sh` builds `src/` and
+`../exportshim/`, packs them with `blehelper.py` and `../lutris/mywhoosh-ble.sh`
+into one archive, and `--release <tag>` publishes it; the installers fetch that
+tag. So a change here reaches nobody until a release is cut, and the helper can
+never be a different build from the shim it talks to over loopback. `MANIFEST`,
+inside the archive and left in the prefix, records the commit each build came
+from, which is the only way to tell afterwards what a prefix has.

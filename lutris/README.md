@@ -97,8 +97,42 @@ run is kept beside it as `session.log.prev`.
 
 ## Changing the shim
 
-The installer downloads the assemblies from `../dist/` by raw URL, and
-`variables.shim_repo` at the top of each `.yml` is the branch it fetches from —
-one line to change when this branch merges. After changing anything under
-`../bleshim/src/` or `../exportshim/`, run `../dist.sh` and commit `dist/`, or
-users will keep installing the old build.
+The installer downloads one archive — `mywhoosh-bleshim-<tag>.tar.gz`, a
+GitHub release asset holding the three assemblies, `blehelper.py` and this
+directory's `mywhoosh-ble.sh` — and `variables.shim_release` at the top of each
+`.yml` is the tag it fetches. One archive rather than five raw URLs because the
+helper and the shim inside the prefix speak a protocol between themselves:
+fetched separately, they eventually arrive as different builds of it.
+
+The `.yml` files are release assets too, so the install URL is a release rather
+than a branch tip:
+
+```sh
+lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/download/v1/mywhoosh.yml
+```
+
+So a change under `../bleshim/src/`, `../exportshim/`, `blehelper.py` or
+`mywhoosh-ble.sh` reaches nobody until a release is cut:
+
+```sh
+../dist.sh                 # build and pack into ../build/, to test by hand
+../dist.sh --release v2    # bump the .yml pins, then publish with gh
+```
+
+`--release` bumps `shim_release` in both `.yml` files and stops if that leaves
+the tree dirty — `gh` tags the release at `HEAD`, and the tag has to point at
+the commit whose installers pin it. Commit, run it again, and it uploads the
+archive and both installers. Keep `GAME_LIBS` set while building: `../bleshim/build.sh`
+then checks the shim's surface against the game's own metadata, and a member
+missing from a release build is a `MissingMethodException` in the middle of
+someone's ride.
+
+The archive is unpacked into `$GAMEDIR/bleshim`, and the three assemblies are
+copied on to the prefix's mono tree from there. `MANIFEST` stays behind, which
+is the only thing in a prefix that says which build it has.
+
+`lutris -i mywhoosh.yml` from a checkout is still the way to install into a
+fresh prefix, but note it fetches the pinned *release*, not what you just
+built — a working tree changes nothing about what lands in the prefix. To put
+your own build in an existing prefix, use `../bleshim/install.sh` and
+`../exportshim/install.sh`, which copy from `build/` directly.

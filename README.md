@@ -31,24 +31,17 @@ The installer checks all of this at the end and tells you what is missing.
 
 ## Installation
 
-### 1. Clone this repository
+Nothing to clone: the installer is a release asset, and it downloads
+everything else it needs.
 
 ```bash
-git clone https://github.com/Dj0ulo/mywhoosh-linux.git
-cd mywhoosh-linux
+lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywhoosh.yml
 ```
 
-### 2. Install via Lutris
+(For MyWhoosh HD, `mywhoosh-hd.yml` from the same release.)
 
-Import the provided Lutris installer script:
-
-```bash
-lutris -i lutris/mywhoosh.yml
-```
-
-(For MyWhoosh HD, `lutris/mywhoosh-hd.yml`.)
-
-This will:
+The installer pins the release it came from, so it installs the build that
+release was tested with. This will:
 1. Create a 64-bit Wine prefix
 2. Download the MyWhoosh MSIX package directly from the Microsoft Store
 3. Extract and install it into the Wine prefix
@@ -56,7 +49,7 @@ This will:
    the game
 5. Wire that helper to start and stop with the game, and check your setup
 
-### 3. Launch MyWhoosh
+### Launching
 
 Launch it from Lutris like any other game. The Bluetooth helper starts with it
 and stops when you quit.
@@ -93,7 +86,7 @@ companion app still works and needs nothing from this repository:
 | `lutris/mywhoosh-ble.sh` | Checks the setup, and starts/stops the Bluetooth helper around the game |
 | `bleshim/` | The Bluetooth stack: a .NET assembly the game loads instead of WinRT, plus a Linux helper speaking BlueZ |
 | `exportshim/` | Four game entry points wine-mono cannot marshal, replaced in memory |
-| `dist/` | The built assemblies the installer downloads |
+| `dist.sh` | Builds and publishes the release archive the installer downloads |
 | `patch/` | Unused here — the startup patch from `main`, kept because that branch's installer needs it |
 
 MyWhoosh talks to sensors over Bluetooth using a Windows API (WinRT) that Wine

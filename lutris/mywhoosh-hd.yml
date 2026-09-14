@@ -27,18 +27,18 @@ slug: mywhoosh-hd-ms-store
 runner: wine
 script:
   variables:
-    # The branch these are fetched from.  One line to change when this merges.
-    shim_repo: https://raw.githubusercontent.com/Dj0ulo/mywhoosh-linux/bleshim
+    # The release the Bluetooth stack is fetched from.  `../dist.sh --release`
+    # bumps this line; it is the one thing that says which build users get.
+    shim_release: v1
   files:
     - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms_store_download.py
-    # The Bluetooth stack: two assemblies the game loads instead of WinRT, the
-    # export shim it needs to poll its device list, the Linux-side BlueZ helper,
-    # and the script Lutris runs to start and stop that helper with the game.
-    - shim_windows: $shim_repo/dist/Windows.dll
-    - shim_winrt: $shim_repo/dist/System.Runtime.WindowsRuntime.dll
-    - shim_exports: $shim_repo/dist/MyWhooshShim.dll
-    - blehelper: $shim_repo/bleshim/blehelper.py
-    - ble_session: $shim_repo/lutris/mywhoosh-ble.sh
+    # The Bluetooth stack, as one versioned archive: two assemblies the game
+    # loads instead of WinRT, the export shim it needs to poll its device list,
+    # the Linux-side BlueZ helper, and the script Lutris runs to start and stop
+    # that helper with the game.  One archive because the helper and the shim
+    # inside the prefix speak a protocol between themselves -- fetched
+    # separately, they are eventually different builds of it.
+    - shim: https://github.com/Dj0ulo/mywhoosh-linux/releases/download/$shim_release/mywhoosh-bleshim-$shim_release.tar.gz
   game:
     exe: drive_c/MyWhooshHD/MyWhoosh.exe
     prefix: $GAMEDIR
@@ -78,22 +78,26 @@ script:
     # prefix's own mono tree -- so the shim goes there, and no game file is
     # touched.  This is also why the mono tree must exist: leave Mono enabled
     # when creating the prefix.
-    - copy:
-        description: Installing the Bluetooth shim
-        src: shim_windows
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
-    - copy:
-        src: shim_winrt
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
-    - copy:
-        src: shim_exports
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
-    - copy:
-        src: blehelper
+    - mkdir: $GAMEDIR/bleshim
+    - extract:
+        file: shim
         dst: $GAMEDIR/bleshim
+        # Named rather than guessed: Lutris guesses from the downloaded file's
+        # name, and the archive only has to be renamed once for that to become
+        # a silent no-op.
+        format: tgz
+    # The assemblies go on to the prefix's mono tree; MANIFEST and the two
+    # scripts stay in $GAMEDIR/bleshim, where the helper runs from and where
+    # the manifest can still say afterwards which build this prefix has.
     - copy:
-        src: ble_session
-        dst: $GAMEDIR/bleshim
+        src: $GAMEDIR/bleshim/Windows.dll
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
+    - copy:
+        src: $GAMEDIR/bleshim/System.Runtime.WindowsRuntime.dll
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
+    - copy:
+        src: $GAMEDIR/bleshim/MyWhooshShim.dll
+        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
     - chmodx: $GAMEDIR/bleshim/blehelper.py
     - chmodx: $GAMEDIR/bleshim/mywhoosh-ble.sh
     - execute:

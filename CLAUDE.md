@@ -32,7 +32,7 @@ run `dev` has that service installed deliberately.
 | `winmd/` | The declaration-only stubs the game needs to start at all — and the "Bluetooth off" state to fall back to |
 | `tools/` | Small programs that read the game's own bytecode; every decision here comes from them |
 | `lutris/` | The Lutris installer for this branch, and the script that runs the helper beside the game |
-| `dist/` | The built assemblies that installer downloads — rebuild with `dist.sh` |
+| `dist.sh` | Builds the release archive the installer downloads, and publishes it |
 | `patch/` | From `main`: the startup patch, which this branch must not apply |
 
 Every one of these but `patch/` has a `README.md` for orientation. `bleshim/`
