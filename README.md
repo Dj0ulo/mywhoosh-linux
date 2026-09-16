@@ -44,8 +44,15 @@ lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywh
 **MyWhoosh HD** — the same game with higher-resolution assets, and a separate
 install:
 
+1. MyWoosh with low quality textures:
+
 ```bash
 lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywhoosh-hd.yml
+```
+2. MyWoosh-HD with high quality textures:
+
+```bash
+lutris -i lutris/mywhoosh-hd.yml
 ```
 
 Lutris then does everything itself:
