@@ -18,13 +18,29 @@ An older approach edited `WindowsConnectivity.dll` to get past a Bluetooth check
 at startup (`../patch/`). The installers here **must not**: the game hashes that
 DLL and silently stops loading it when a byte differs, and the Bluetooth support
 needs it loaded — its Bluetooth code is what the shim answers. So instead of
-patching a game file, the installer adds three assemblies to the prefix's own
-wine-mono tree (`drive_c/windows/mono/mono-2.0/lib`), which is where mono probes
-for a referenced assembly by simple name. No file in the game directory is
-touched.
+patching a game file, the installer unpacks three assemblies into
+`$GAMEDIR/bleshim` and points mono at them through the game's environment:
 
-That also means the prefix must have wine-mono in it — the default when Lutris
-creates a prefix. `mywhoosh-ble.sh check` says so plainly if it is missing.
+```yaml
+MONO_PATH: Z:$GAMEDIR/bleshim
+```
+
+mono searches `MONO_PATH` first for a referenced assembly by simple name, and
+`Windows` is exactly the name the game's metadata asks for. No file in the game
+directory is touched.
+
+Not the prefix's own wine-mono tree (`drive_c/windows/mono/mono-2.0/lib`),
+where v0.1.0 put them: current Wine and Proton builds — GE-Proton, wine-ge 8 —
+run wine-mono from the runner's directory and install none into the prefix, so
+that directory is one nothing reads. `MONO_PATH` works with either layout, and
+beats a copy in the prefix's tree when there is one. It must be a Windows path —
+mono inside the prefix reads `/home/...` as `C:\home\...` — hence `Z:`, which
+Wine maps to `/`.
+
+`mywhoosh-ble.sh start` checks this at every launch, and says how to fix an
+install that has neither `MONO_PATH` nor a real mono tree holding the shim:
+that game dies at its first Bluetooth call with a `TypeLoadException` naming
+`Windows`.
 
 ## How the helper gets started
 
@@ -93,7 +109,8 @@ Two environment variables, settable in Lutris under *Configure → System option
 | `MYWHOOSH_SHIM_LOG` | `$GAMEDIR/bleshim/session.log` | Where every layer logs |
 
 The log is the diagnostic tool: the helper, the shim inside the prefix and the
-export shim all write to that one file, each with its own tag. The previous
+export shim all write to that one file, each with its own tag, and the
+install-time `check` writes its report there too. The previous
 run is kept beside it as `session.log.prev`.
 
 ## Changing the shim
@@ -128,9 +145,9 @@ then checks the shim's surface against the game's own metadata, and a member
 missing from a release build is a `MissingMethodException` in the middle of
 someone's ride.
 
-The archive is unpacked into `$GAMEDIR/bleshim`, and the three assemblies are
-copied on to the prefix's mono tree from there. `MANIFEST` stays behind, which
-is the only thing in a prefix that says which build it has.
+The archive is unpacked into `$GAMEDIR/bleshim`, and everything stays there:
+the assemblies mono loads through `MONO_PATH`, the helper, and `MANIFEST`,
+which is the only thing in a prefix that says which build it has.
 
 `lutris -i mywhoosh.yml` from a checkout is still the way to install into a
 fresh prefix, but note it fetches the pinned *release*, not what you just

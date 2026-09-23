@@ -67,8 +67,9 @@ Three pieces, in the order the game meets them.
 **1. A managed assembly the game loads instead of WinRT.** MyWhoosh's
 `WindowsConnectivity.dll` references an assembly called `Windows`, which on
 Windows is the WinRT metadata file. Mono resolves that reference *by simple
-name*, from the prefix's own directory `c:\windows\mono\mono-2.0\lib`. So a
-plain .NET assembly named `Windows.dll` sitting there satisfies it, and the
+name*, and searches `MONO_PATH` first — the Lutris installer points that at
+`$GAMEDIR/bleshim`. So a plain .NET assembly named `Windows.dll` sitting there
+satisfies it, and the
 game's calls — `BluetoothLEAdvertisementWatcher.Start`, `ReadValueAsync`,
 `ValueChanged` — land in ordinary C# we wrote. That is `src/Windows.cs`, and it
 is why no Wine change and no game-file edit is needed. (The game will not load
@@ -104,9 +105,11 @@ blehelper.py  ──►  BlueZ (D-Bus)  ──►  your Bluetooth adapter
 
 ## What else the prefix needs
 
-- **wine-mono installed into the prefix** (not Wine's shared copy), because
-  `install.sh` writes into that tree. The runner's stock build is fine; nothing
-  here needs a patched runtime.
+- **wine-mono**, from the runner or installed into the prefix — the Lutris
+  install works with either, through `MONO_PATH`. `install.sh` below writes
+  into the prefix's own tree, so it needs the second: a prefix whose runner
+  keeps wine-mono in its own directory has no tree to write to. The stock build
+  is fine; nothing here needs a patched runtime.
 
 And one thing the prefix must **not** have:
 

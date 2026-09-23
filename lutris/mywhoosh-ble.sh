@@ -22,10 +22,15 @@ PIDFILE="$DIR/blehelper.pid"
 LOG="${MYWHOOSH_SHIM_LOG:-$DIR/session.log}"
 PORT="${MYWHOOSH_BLE_PORT:-27019}"
 ADAPTER="${MYWHOOSH_BLE_ADAPTER:-hci0}"
-# The prefix is the game directory's parent structure: this script lives in
-# <prefix>/bleshim, and the prefix is what holds drive_c.
-PREFIX="${WINEPREFIX:-$(dirname "$DIR")}"
-MONO="$PREFIX/drive_c/windows/mono/mono-2.0/lib"
+# The assemblies the game loads instead of WinRT live beside this script, and
+# the installer's MONO_PATH is what points mono here -- as a Windows path,
+# because that is how mono inside the prefix reads it.
+SHIM_DLLS="Windows.dll System.Runtime.WindowsRuntime.dll MyWhooshShim.dll"
+MONO_DIR="Z:$DIR"
+# Where v0.1.0 copied them instead.  Only a prefix with wine-mono installed in
+# it ever probed that directory, so an install from then works only if that
+# tree is real -- which is what shim_reachable asks.
+MONO_TREE="$(dirname "$DIR")/drive_c/windows/mono/mono-2.0/lib"
 
 # ------------------------------------------------------------ the Flatpak case
 # Lutris is very often a Flatpak, and its sandbox is no place to reach Bluetooth
@@ -136,6 +141,14 @@ deps_report() {
     return $ok
 }
 
+# Will mono find the shim when the game starts?  Asked at launch, of the
+# game's own environment: either MONO_PATH names this directory, or this is an
+# install from before MONO_PATH whose prefix really has wine-mono in it.
+shim_reachable() {
+    case ";${MONO_PATH:-};" in *";$MONO_DIR;"*) return 0 ;; esac
+    [ -f "$MONO_TREE/mono/4.5/mscorlib.dll" ] && [ -f "$MONO_TREE/Windows.dll" ]
+}
+
 notify() {
     # Through the host as well: the Flatpak runtime may have no notify-send,
     # and the manifest asks for no notification name on the session bus.
@@ -146,26 +159,21 @@ notify() {
 case "${1:-}" in
 check)
     clean_env
+    # Into the log as well: Lutris shows an install step's output to nobody
+    # once the install has finished, and this is where a user looks afterwards.
+    exec > >(tee -a "$LOG") 2>&1
     say "checking the Bluetooth setup"
-    for dll in Windows.dll System.Runtime.WindowsRuntime.dll MyWhooshShim.dll; do
-        if [ -f "$MONO/$dll" ]; then
-            say "ok    $dll in the prefix's mono tree"
+    for dll in $SHIM_DLLS; do
+        if [ -f "$DIR/$dll" ]; then
+            say "ok    $dll"
         else
-            say "MISSING $MONO/$dll"
+            say "MISSING $DIR/$dll"
         fi
     done
-    # mono/4.5/mscorlib.dll is wine-mono's own; without it the directory above
-    # is one we created by copying into it, and the game will not start at all.
-    mono_ok=0
-    [ -f "$MONO/mono/4.5/mscorlib.dll" ] || {
-        mono_ok=1
-        say "MISSING wine-mono in this prefix ($MONO)"
-        say "      the game itself needs it -- reinstall without disabling Mono"
-    }
     [ -x "$HELPER" ] || chmod +x "$HELPER" 2>/dev/null
     [ -f "$HELPER" ] || say "MISSING $HELPER"
 
-    if deps_report && [ "$mono_ok" = 0 ]; then
+    if deps_report; then
         say "ready -- start MyWhoosh from Lutris and pair your trainer in the game"
     else
         say "the game will run, but it will report Bluetooth as off until the above is fixed"
@@ -187,6 +195,12 @@ start)
     # (a sensor that never appears) are read after quitting the game.
     [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev" 2>/dev/null
     say "log: $LOG"
+
+    # Not a Bluetooth problem but a fatal one: without the shim the game dies
+    # at its first Bluetooth call, with a TypeLoadException naming `Windows`.
+    if ! shim_reachable; then
+        notify "mono will not find the Bluetooth shim -- add MONO_PATH=$MONO_DIR to this game's environment variables in Lutris, or reinstall"
+    fi
 
     if [ ! -f "$HELPER" ]; then
         notify "the Bluetooth helper is missing ($HELPER)"

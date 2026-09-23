@@ -80,9 +80,9 @@ namespace MyWhoosh.Ble
             }
             if (string.IsNullOrEmpty(path))
             {
-                // Next to ourselves, which is the prefix's mono tree: the shim
-                // is installed beside this assembly and neither knows where the
-                // prefix is.
+                // Next to ourselves -- $GAMEDIR/bleshim through MONO_PATH, or
+                // the prefix's mono tree from install.sh: the shim is installed
+                // beside this assembly and neither knows where that is.
                 string here = Path.GetDirectoryName(typeof(Loader).Assembly.Location);
                 path = Path.Combine(here ?? ".", ShimAssembly);
             }

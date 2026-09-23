@@ -58,6 +58,12 @@ script:
       # Every layer -- the helper, the shim inside the prefix, the export
       # shim -- writes here, so one file explains a ride that found no sensors.
       MYWHOOSH_SHIM_LOG: $GAMEDIR/bleshim/session.log
+      # Where mono finds the assemblies the game loads instead of WinRT.  Not
+      # the prefix's mono tree: current Wine and Proton run wine-mono from the
+      # runner's own directory and install none into the prefix, so there is
+      # no tree there to put them in.  MONO_PATH is searched first whichever
+      # mono runs, and it is read as a Windows path -- hence Z:, which is /.
+      MONO_PATH: Z:$GAMEDIR/bleshim
   installer:
     - task:
         name: create_prefix
@@ -74,10 +80,9 @@ script:
         dst: $GAMEDIR/drive_c/MyWhooshHD/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
     # WindowsConnectivity.dll is deliberately NOT patched: the game hashes it
     # and silently stops loading it if one byte differs.  What it is missing is
-    # an assembly named `Windows`, which mono resolves by simple name out of the
-    # prefix's own mono tree -- so the shim goes there, and no game file is
-    # touched.  This is also why the mono tree must exist: leave Mono enabled
-    # when creating the prefix.
+    # an assembly named `Windows`, which mono resolves by simple name -- so the
+    # shim is unpacked here and MONO_PATH above points mono at it, and no game
+    # file is touched.
     - mkdir: $GAMEDIR/bleshim
     - extract:
         file: shim
@@ -86,18 +91,6 @@ script:
         # name, and the archive only has to be renamed once for that to become
         # a silent no-op.
         format: tgz
-    # The assemblies go on to the prefix's mono tree; MANIFEST and the two
-    # scripts stay in $GAMEDIR/bleshim, where the helper runs from and where
-    # the manifest can still say afterwards which build this prefix has.
-    - copy:
-        src: $GAMEDIR/bleshim/Windows.dll
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
-    - copy:
-        src: $GAMEDIR/bleshim/System.Runtime.WindowsRuntime.dll
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
-    - copy:
-        src: $GAMEDIR/bleshim/MyWhooshShim.dll
-        dst: $GAMEDIR/drive_c/windows/mono/mono-2.0/lib
     - chmodx: $GAMEDIR/bleshim/blehelper.py
     - chmodx: $GAMEDIR/bleshim/mywhoosh-ble.sh
     - execute:

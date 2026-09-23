@@ -202,9 +202,14 @@ against a scratch prefix, and the session script exercised for
 start/stop/already-running/missing-helper. What has not been done is `lutris -i`
 on a machine with no prefix, all the way to a ride. Two things only that shows:
 
-- whether the runner's `create_prefix` leaves a wine-mono tree at
-  `drive_c/windows/mono/mono-2.0/lib` for every runner people actually use
-  (`mywhoosh-ble.sh check` reports it when it does not);
+- that `MONO_PATH` reaches the game through Lutris for every runner people
+  actually use. It is how the installer finds the shim now, because current
+  runners (GE-Proton, wine-ge 8) put no wine-mono tree in the prefix at all
+  (issue #9). Measured with a probe assembly under GE-Proton10-4's wine: found
+  on the runner's shared mono, and ahead of a copy in an in-prefix tree; a Unix
+  path is read as `C:\...` and finds nothing. The game itself has not been
+  launched that way through Lutris. `mywhoosh-ble.sh start` warns when neither
+  `MONO_PATH` nor a real in-prefix tree would find it;
 - whether the game, freshly installed and never patched, reaches the sensor
   screen.
 
