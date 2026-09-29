@@ -29,7 +29,7 @@ script:
   variables:
     # The release the Bluetooth stack is fetched from.  `../dist.sh --release`
     # bumps this line; it is the one thing that says which build users get.
-    shim_release: v0.1.1
+    shim_release: v0.1.2
   files:
     - downloader: https://raw.githubusercontent.com/Dj0ulo/ms-store-download/main/ms_store_download.py
     # The Bluetooth stack, as one versioned archive: two assemblies the game
