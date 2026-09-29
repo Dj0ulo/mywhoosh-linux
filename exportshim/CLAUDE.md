@@ -32,6 +32,40 @@ Three consequences, from reading it rather than guessing:
   writing the out-direction inside `libmono` and shipping a self-built
   wine-mono.
 
+## The float returns, and heart rate
+
+The twelve `float`-returning exports (`BT_GetHeart`, `BT_GetPower`, …) marshal
+fine; the engine reads the wrong register. Measured in the prefix with a
+mingw-built native caller against the game's own DLL: `WD_GetHeart` returned
+`-1.0` in `xmm0` and `0xc5f000` in `rax`. The HUD showed exactly that kind of
+value — a heap address, different every run — while the probe calling the
+same export got the right BPM. On Windows the CLR's `cvtsi2ss xmm0, eax`
+leaves the `int` in `rax`, so a caller that reads `rax` gets the right answer
+by accident; mono's wrapper runs more code after it and does not.
+
+Mirroring the value into `eax` is harmless to a caller that reads `xmm0`, so
+it is applied to every float or double export rather than only the ones known
+to be misread.
+
+Two things about the stub that are not obvious:
+
+- **The slot is not stable before the first call.** It starts as mono's
+  compile-on-demand trampoline, which overwrites the slot with the compiled
+  wrapper when first called. A stub that simply captured the old value and
+  called it was replaced on its first call — the first version of this fix did
+  nothing for that reason. The stub calls through a cell of its own and, after
+  each call, moves whatever mono put in the slot into the cell and takes the
+  slot back. The device-list hooks never call the trampoline, so they do not
+  need this.
+- **It registers unwind info** (`RtlAddFunctionTable`) so that a stack walk
+  through the stub, from a debugger, a crash handler or mono itself, does not
+  stop there.
+
+Ruled out on the way, from the IL: `SensorBase.GetHeart` clamps to 300, so the
+value never came from the decoding path; `ConnectedDevicesData.heartRate` is
+only ever written as 0; and `BT_UpdateSlots` delivers the heart-rate slot
+correctly (the sensor is in `pairedList` and `GetHeart()` answers the BPM).
+
 ## Two details that are deliberate
 
 **Nothing may escape.** These run as native-to-managed thunks, where an

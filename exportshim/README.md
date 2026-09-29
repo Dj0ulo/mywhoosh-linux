@@ -1,8 +1,8 @@
-# exportshim — replacing four broken entry points, in memory
+# exportshim — replacing broken entry points, in memory
 
 MyWhoosh's `WindowsConnectivity.dll` is a .NET assembly that also exposes 98 C
-functions. Four of them are the ones the game's device-list UI polls twice a
-second:
+functions, and wine-mono gets two kinds of them wrong. Four are the ones the
+game's device-list UI polls twice a second:
 
 ```
 int WD_GetScannedDevicesList  (out DeviceInformationStruct[] devices)
@@ -20,9 +20,13 @@ System.Runtime.InteropServices.MarshalDirectiveException:
   Byref array marshalling to managed code is not implemented.
 ```
 
-This directory fixes that without touching the game: it finds the four function
-pointers in the running process and replaces them with managed implementations
-of our own, which do the marshalling by hand.
+The other twelve return a `float` — `BT_GetHeart`, `BT_GetPower`,
+`WD_GetCadence` and the rest. Those work, but the game's engine reads the
+answer from the wrong register, and wine-mono leaves a pointer there: see
+*Heart rate as a nine-digit number* below.
+
+This directory fixes both without touching the game: it finds the function
+pointers in the running process and replaces them with code of our own.
 
 ```sh
 ./build.sh
@@ -62,22 +66,44 @@ call the game's own managed method by reflection, allocate native memory for the
 returned elements, copy each one out, store the block's address through the
 caller's pointer, and return the count.
 
+## Heart rate as a nine-digit number
+
+The symptom was a heart-rate monitor that worked everywhere except where it
+mattered: the pairing screen showed the right BPM, and the riding HUD showed a
+number like 861,795,712 — a different one each run.
+
+The game's own getter was never wrong. `BT_GetHeart` is `(float)GetHeart()`,
+and called through the export it answered 88 while the HUD said 864,271,936.
+A `float` comes back in `xmm0`; the engine reads `rax`, as if the export
+returned an `int`. On Windows that works by accident, because the CLR's
+conversion leaves the original `int` sitting in `rax`. wine-mono's
+native-to-managed wrapper leaves a heap pointer there instead, and the HUD
+prints it.
+
+So each float-returning export gets a few bytes of machine code in front of it
+that call the real one and then copy the truncated result into `eax` too. A
+caller reading `xmm0` sees no change. The one subtlety is that mono compiles
+these lazily: the first call through a slot replaces it with the compiled
+wrapper, so the stub takes the slot back afterwards.
+
 ## What it looks like when it works
 
 ```
 [exportshim] BT_GetScannedDevicesList: slot 0x180036080 0x39871b50 -> 0x39879500
              ... hooked 4/4 exports
+[exportshim] float returns mirrored into eax: 12/12 -- BT_GetPower,BT_GetCadence,BT_GetHeart,...
 [exportshim] BT_GetConnectedDevicesList -> 3 device(s) at 0x337e6310
 ```
 
 `hooked 4/4 exports` is the line to look for. Anything less means the stub shape
-was not recognised and the game will crash on its first poll.
+was not recognised and the game will crash on its first poll. Short of `12/12`
+on the second line, the missing ones show pointers on the HUD again.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `ExportShim.cs` | Finds the slots, replaces them, marshals the arrays |
+| `ExportShim.cs` | Finds the slots, replaces them, marshals the arrays, fixes the float returns |
 | `build.sh` | `mcs` → `build/MyWhooshShim.dll` |
 | `install.sh` | Copies it into the prefix's wine-mono tree (`--restore` removes it) |
 
