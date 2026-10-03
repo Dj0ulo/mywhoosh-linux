@@ -5,7 +5,7 @@ Two installer scripts and the small script that runs beside the game.
 | File | What it is |
 |---|---|
 | `mywhoosh.yml` | Installs MyWhoosh from the Microsoft Store into a Wine prefix, with Bluetooth |
-| `mywhoosh-hd.yml` | The same for MyWhoosh HD — a different store id and directory, otherwise identical |
+| `mywhoosh-hd.yml` | The same for MyWhoosh HD — a different store id and directory, and its own vkd3d-proton: HD renders with D3D12, which Lutris' vkd3d v2.14 crashes at startup |
 | `mywhoosh-ble.sh` | Runs on the Linux side: checks the setup at install time, starts and stops the helper around the game |
 | `debug.sh` | Builds, removes the previous debug install, and runs `mywhoosh.yml` (`--hd`: `mywhoosh-hd.yml`) rewritten to install this checkout's build and the MSIX cached in `../downloads/`: a fresh install to try before a release |
 

@@ -39,12 +39,22 @@ script:
     # inside the prefix speak a protocol between themselves -- fetched
     # separately, they are eventually different builds of it.
     - shim: https://github.com/Dj0ulo/mywhoosh-linux/releases/download/$shim_release/mywhoosh-bleshim-$shim_release.tar.gz
+    # MyWhoosh HD renders with Direct3D 12, and the vkd3d-proton Lutris
+    # installs (v2.14, the last in lutris/vkd3d) crashes it at startup: UE
+    # creates a device on every GPU, and the first call after one on an Intel
+    # iGPU reads a null pointer inside d3d12core.  3.0.1 does not.
+    - vkd3d: https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.0.1/vkd3d-proton-3.0.1.tar.zst
   game:
     exe: drive_c/MyWhooshHD/MyWhoosh.exe
     prefix: $GAMEDIR
     arch: win64
   wine:
     dxvk: true
+    # "manual" makes Lutris set d3d12 and d3d12core native and leave the DLLs
+    # in system32 alone -- which are the ones the installer puts there below.
+    # Any version name instead would have it link its own v2.14 back in.
+    vkd3d: true
+    vkd3d_version: manual
   system:
     # The game's Bluetooth is answered from inside the prefix, but the hardware
     # is reached from outside it: BlueZ is on D-Bus, and Wine's winsock has no
@@ -78,6 +88,20 @@ script:
     - move:
         src: $GAMEDIR/drive_c/MyWhooshHD/MyWhoosh/Binaries/Win64/MyWhoosh.exe
         dst: $GAMEDIR/drive_c/MyWhooshHD/MyWhoosh/Binaries/Win64/MyWhoosh-Win64-Shipping.exe
+    # Lutris' own extract cannot open .tar.zst (Python's tarfile has no zstd
+    # before 3.14), so tar does it.  Only the 64-bit DLLs go in: the game is.
+    - mkdir: $GAMEDIR/vkd3d
+    - execute:
+        description: Installing vkd3d-proton 3.0.1
+        file: tar
+        args: --zstd -xf $vkd3d -C $GAMEDIR/vkd3d --strip-components=1
+        disable_runtime: true
+    - execute:
+        file: cp
+        # --remove-destination: were system32/d3d12.dll a symlink into Lutris'
+        # runtime, a plain cp would write through it and replace Lutris' copy.
+        args: --remove-destination $GAMEDIR/vkd3d/x64/d3d12.dll $GAMEDIR/vkd3d/x64/d3d12core.dll $GAMEDIR/drive_c/windows/system32/
+        disable_runtime: true
     # WindowsConnectivity.dll is deliberately NOT patched: the game hashes it
     # and silently stops loading it if one byte differs.  What it is missing is
     # an assembly named `Windows`, which mono resolves by simple name -- so the
