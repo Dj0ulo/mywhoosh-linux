@@ -7,8 +7,7 @@ Two installer scripts and the small script that runs beside the game.
 | `mywhoosh.yml` | Installs MyWhoosh from the Microsoft Store into a Wine prefix, with Bluetooth |
 | `mywhoosh-hd.yml` | The same for MyWhoosh HD — a different store id and directory, otherwise identical |
 | `mywhoosh-ble.sh` | Runs on the Linux side: checks the setup at install time, starts and stops the helper around the game |
-| `mywhoosh-debug.yml` | `mywhoosh.yml` installing this checkout's build and the MSIX cached in `../downloads/` — run through `debug.sh` |
-| `debug.sh` | Builds, removes the previous debug install, and runs `mywhoosh-debug.yml`: a fresh install to try before a release |
+| `debug.sh` | Builds, removes the previous debug install, and runs `mywhoosh.yml` (`--hd`: `mywhoosh-hd.yml`) rewritten to install this checkout's build and the MSIX cached in `../downloads/`: a fresh install to try before a release |
 
 ```sh
 lutris -i lutris/mywhoosh.yml
