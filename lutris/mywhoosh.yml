@@ -2,24 +2,14 @@ name: MyWhoosh
 game_slug: mywhoosh
 version: Microsoft Store
 description: |
-  This installer downloads the MyWhoosh MSIX package from the Microsoft Store,
-  installs it into a Wine prefix, and sets up Bluetooth so your smart trainer
-  and heart-rate strap connect straight from Linux — no phone, no companion app.
+  Installs MyWhoosh from the Microsoft Store and lets your smart trainer and
+  heart-rate strap connect through your computer's Bluetooth. Pair them from
+  the game's device screen, as you would on Windows.
 
-  Your trainer pairs in the game's own device screen, through your computer's
-  own Bluetooth adapter. Lutris starts the Linux-side Bluetooth helper with the
-  game and stops it when you quit.
+  Make sure Bluetooth is turned on and working before you start.
 
-  Before installing, make sure Bluetooth works on your machine:
-  `bluetoothctl scan on` should show your trainer when you pedal.
-
-  The Python packages the helper needs come with a distro package of Lutris, so
-  they are almost certainly already installed. If you run Lutris as a Flatpak,
-  the helper runs on your host instead, and your host needs python3-dbus and
-  python3-gi (python-dbus / python-gobject on Arch). The last step of the
-  install checks all of this and tells you what is missing.
-  If you would rather bridge your sensors from a phone instead, the MyWhoosh
-  Link companion app still works:
+  You can also connect your sensors through your phone with the MyWhoosh
+  Link app:
    - Android: https://play.google.com/store/apps/details?id=com.whoosh.companion
    - iOS: https://apps.apple.com/be/app/mywhoosh-link/id1561724525
 

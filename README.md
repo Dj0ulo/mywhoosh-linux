@@ -7,8 +7,8 @@ a race with other people.
 It ships for Windows, macOS, iOS and Android — but not Linux. This repository
 installs it on Linux with [Lutris](https://lutris.net/) and
 [Wine](https://www.winehq.org/), **and connects your Bluetooth sensors to it**
-through your computer's own Bluetooth adapter. Your trainer and heart-rate strap
-pair in the game's normal device screen. No phone, no companion app.
+through your computer's own Bluetooth adapter or through the **MyWhoosh Link**
+companion app.
 
 ---
 
@@ -76,28 +76,6 @@ most common reason a device does not show up.
 Several sensors at once are fine (a trainer and a heart-rate strap, say); each
 gets its own connection.
 
-## When something does not work
-
-Everything writes to one log file, inside the game's directory:
-
-```
-<game directory>/bleshim/session.log
-```
-
-That is the first thing to look at, and the previous run is kept beside it as
-`session.log.prev`.
-
-| What you see | What it usually means |
-|---|---|
-| The game says Bluetooth is off | The adapter is off (`bluetoothctl power on`), or the helper did not start — the log says which |
-| Your trainer never appears in the scan | It is asleep. Pedal a turn, then scan again |
-| Phones and watches never appear | Normal. The game only lists devices advertising a fitness service |
-| Nothing at all in the log | The helper is not running; on Flatpak Lutris, check the two host packages above |
-
-[`bleshim/README.md`](bleshim/README.md) goes further, and
-[`lutris/README.md`](lutris/README.md) covers the install itself — which adapter
-is used, where things are put, and how the helper is started.
-
 ## Using a phone instead
 
 If you would rather bridge your sensors from a phone, the **MyWhoosh Link**
@@ -105,8 +83,6 @@ companion app still works and needs nothing from this repository:
 
 - **Android:** [MyWhoosh Link on Google Play](https://play.google.com/store/apps/details?id=com.whoosh.companion)
 - **iOS:** [MyWhoosh Link on the App Store](https://apps.apple.com/be/app/mywhoosh-link/id1561724525)
-
----
 
 ## How it works, briefly
 
