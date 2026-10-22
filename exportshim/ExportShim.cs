@@ -381,6 +381,27 @@ namespace MyWhoosh
             readonly int esize;
             bool firstCall = true;
 
+            // Change-gated logging.  The pairing screen polls this once or
+            // twice a second, and a line for every poll was a session.log
+            // that grew by the hour for one never-changing fact (issue #10).
+            // Say what changed: a count that moves, and a steady count at
+            // most every minute so silence still proves the poll alive.
+            int lastCount = -1;
+            DateTime lastLoggedAt;
+
+            // Two alternating CoTaskMem blocks, grown in place, never freed
+            // while the poller lives.  The first version allocated a fresh
+            // block for every poll -- two or three allocations a second of a
+            // couple of structs each, which the allocator barely notices but
+            // which nothing ever frees, because which block a caller still
+            // holds after the call is unknowable.  Alternating gives the
+            // common case (two calls a few milliseconds apart, two different
+            // blocks) its own slot without a free, and growth replaces a slot
+            // in place the rare time the device list outgrows it.
+            readonly IntPtr[] blocks = new IntPtr[2];
+            readonly int[] blockBytes = new int[2];
+            int slot;
+
             internal Poller(string name, MethodInfo method, Type elem)
             {
                 this.name = name;
@@ -418,19 +439,35 @@ namespace MyWhoosh
 
                 int count = devices.Count;
 
-                // Mirror the CLR's out-direction: a fresh CoTaskMemAlloc block,
-                // its address stored through the pointer, the count returned.
-                // Never null, so a caller that dereferences before checking the
-                // count reads zeroed memory instead of faulting.
-                int bytes = esize * Math.Max(count, 1);
-                IntPtr block = Marshal.AllocCoTaskMem(bytes);
+                // Mirror the CLR's out-direction: a CoTaskMem block of
+                // structs, its address stored through the pointer, the count
+                // returned.  Never null, so a caller that dereferences before
+                // checking the count reads zeroed memory instead of faulting.
+                int wanted = esize * Math.Max(count, 1);
+                slot = slot == 1 ? 0 : 1;
+                if (blocks[slot] == IntPtr.Zero || blockBytes[slot] < wanted)
+                {
+                    if (blocks[slot] != IntPtr.Zero) Marshal.FreeCoTaskMem(blocks[slot]);
+                    blockBytes[slot] = wanted;
+                    blocks[slot] = Marshal.AllocCoTaskMem(wanted);
+                }
+                IntPtr block = blocks[slot];
+                int bytes = blockBytes[slot];
                 for (int i = 0; i < bytes; i++) Marshal.WriteByte(block, i, 0);
                 for (int i = 0; i < count; i++)
                     Marshal.StructureToPtr(devices[i],
                                            new IntPtr(block.ToInt64() + (long)i * esize), false);
 
                 if (ppDevices != IntPtr.Zero) Marshal.WriteIntPtr(ppDevices, block);
-                if (count > 0) Log(name + " -> " + count + " device(s) at 0x" + block.ToString("x16"));
+
+                DateTime now = DateTime.UtcNow;
+                if (count != lastCount
+                    || (count > 0 && (now - lastLoggedAt).TotalSeconds > 60))
+                {
+                    Log(name + " -> " + count + " device(s)");
+                    lastCount = count;
+                    lastLoggedAt = now;
+                }
                 return count;
             }
         }

@@ -132,10 +132,23 @@ the BLE path — down.
 
 ## Two rules inside the shim
 
-**Every `IAsyncOperation` completes inline.** `BluetoothProgram::IsBluetoothEnabled`
-awaits and then `Task.Wait()`s on the same thread; anything that actually defers
-deadlocks the game at startup. `src/Windows.cs` wraps `Task.FromResult` — the
-work has already happened by the time the operation is handed back.
+**Only the radios operation completes inline — and it is the rule, not a
+convention.** `BluetoothProgram::IsBluetoothEnabled` awaits `GetRadiosAsync` and
+then `Task.Wait()`s the result on the very same thread; it is the game's *only*
+Bluetooth sync-over-async wait (its IL shows dozens of awaits, one `Task::Wait`),
+and the engine asks it several times a second through `BT_GetModuleState`. A
+deferred answers means a startup deadlock and a frozen UI; so radios is built
+from a completed value, the helper serves it from an in-memory cache,
+`Backend` bounds the wait at 2500 ms and answers from its last snapshot if even
+that fails. *Everything else* is the opposite mistake if it completes inline:
+connect, GATT walks, reads, writes and subscriptions run inside the game's
+async-void chains, so pre-completing them ran the whole BlueZ wait — up to
+thirty seconds — on whatever thread the game happened to call from, which was
+the cause of the "Steam app default not responding" freezes. They all produce
+their task with `Backend.Run` (`Task.Factory.StartNew` — a primitive the wine
+prefix's BCL really has, `TaskCompletionSource` is avoided on purpose) and end
+in an explicit failure shape instead of letting an exception cross: null device,
+`GattCommunicationStatus.Unreachable`, or an empty list.
 
 **Events arrive on the shim's dispatcher thread**, which is not a thread the
 game created. This was the risk named before any of it was written and it turns
@@ -144,16 +157,45 @@ rather than an exception, so it is worth remembering when one appears.
 
 ## The helper protocol
 
-Newline-delimited JSON on `127.0.0.1:27019`, one client at a time.
-
-- Requests carry `id` and `op`: `radios`, `scan`, `connect`, `disconnect`,
-  `services`, `chars`, `read`, `write`, `notify`. Replies carry the same `id`.
-- Unsolicited events carry `event`: `advert`, `value`, `connection`.
-- The shim connects lazily and retries every 5 s, so starting the helper after
-  the game still works.
+Newline-delimited JSON on `127.0.0.1:27019`, one client at a time. Requests
+carry `id` and `op`: `radios`, `scan`, `connect`, `disconnect`, `services`,
+`chars`, `read`, `write`, `notify`. Replies carry the same `id`; unsolicited
+events carry `event`: `advert`, `value`, `connection`. The shim connects lazily
+and retries every 5 s, so starting the helper after the game still works.
 
 Deliberately dumb and transport-agnostic: the helper can later move in-process,
 or be replaced by Wine's own API, without `src/Windows.cs` noticing.
+
+Inside `blehelper.py` the threads are the whole point:
+
+- **Main loop** — GLib main loop on its own D-Bus connection. Owns the socket,
+  every fast question (radios from an in-memory cache; scan toggling;
+  advertisement fan-out) and every write to the client, out of an outbox the
+  worker hands replies to. Signals (`InterfacesAdded`, `PropertiesChanged`)
+  arrive here.
+- **Worker** — one daemon thread with its own D-Bus connection, serving the
+  potentially slow ops (`connect`, `disconnect`, `services`, `chars`, `read`,
+  `write`, `notify`) strictly in arrival order, in a catch-all: a worker that
+  dies would strand every later request. Its replies travel back through the
+  outbox; it never touches the socket. This split is what makes a connect's
+  BlueZ-side 30 s a non-event everywhere else — under the old design every
+  op rode the main loop, so one mid-ride `dev.Connect()` froze scans, radio
+  polls and notifications for its whole duration.
+- **Scan state is one fact** shared through a lock, whichever thread flips it;
+  a connect that needs to see an advertisement (`wait_for_advert`) may turn
+  discovery on itself and turns it back off if it was the one that started it.
+- **Quiescence** — a connect that fails puts that address on a rest ladder
+  (10 s, 20 s, 40 s… capped at 120 s; any success or disconnect clears it).
+  A request for an address still resting is refused on sight by the *main
+  loop*, before the worker queue, so the game's retry-every-5 s loop (which is
+  `DidFailToCreateBluetoothDevice` in the IL) cannot hammer BlueZ with
+  connects — that loop was what kept asking an iPhone to pair against everyone's
+  will.
+
+`fakehelper.py` mirrors the protocol over an in-memory two-device model with
+per-op `--slow`/`--fail` injection, and `TestBle.cs` documents the automated
+scenarios that exercise it. The helpers are the test substrate; BlueZ's own
+reaction time is only visible against real hardware.
 
 ## The Bonjour gate
 

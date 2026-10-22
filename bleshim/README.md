@@ -80,7 +80,11 @@ to BlueZ: BlueZ is D-Bus, D-Bus is a Unix socket, and Wine's winsock has no
 `AF_UNIX`. So the hardware half lives outside Wine as a small Python program
 speaking BlueZ's D-Bus API, and the two halves exchange one JSON object per line
 over `127.0.0.1:27019`. `src/Backend.cs` is the only file in the shim that knows
-this; everything above it just calls methods.
+this; everything above it just calls methods. Inside, the helper runs two
+threads: everything fast — radio state, scan toggling, advertisement events —
+serves from the main loop; the calls that may block on hardware for seconds
+(connects above all) run on a worker thread, with replies handed back through a
+queue. A game request therefore never waits behind a trainer being woken up.
 
 **3. The export shim, `../exportshim/`.** Four of the game's C entry points hand
 their device list back by reference, and wine-mono refuses to marshal that
@@ -152,7 +156,8 @@ got.
 | `src/Loader.cs` | Starts `../exportshim/` from inside the game |
 | `src/SystemRuntimeWindowsRuntime.cs` | The one member the game needs to `await` a WinRT call |
 | `blehelper.py` | The Linux half: BlueZ over D-Bus, serving one client on loopback |
-| `TestBle.cs` | Drives the shim the way the game does, without the game |
+| `fakehelper.py` | A protocol-identical helper over two virtual sensors, with per-op `--slow`/`--fail` injection — the regression substrate |
+| `TestBle.cs` | Drives the shim the way the game does, without the game, plus the automated scenarios (`--stub`, `--stub --slow-radios`, `--quiescence`, `--thin`) |
 | `build.sh` / `install.sh` / `run.sh` | Build, install into a prefix, launch |
 
 `install.sh --verify` says what is currently in a prefix; `--restore` puts the
@@ -169,11 +174,23 @@ mono build/TestBle.exe AA:BB:CC:DD:EE:FF              # connect, walk GATT, subs
 mono build/TestBle.exe AA:BB:CC:DD:EE:FF --control    # ... and take FTMS control
 ```
 
-Run it under wine-mono as well as the host's Mono — the two runtimes disagree
+And without any adapter at all, `./regression.sh` runs the automated scenarios
+against `fakehelper.py`: a six-second connect whose caller becomes free in
+milliseconds, radio polls that stay instant the whole time, a radio poll through
+an unresponsive helper cut off at the shim's own 2.5 s bound, and — against the
+real helper — a device that is nowhere failing slowly once and then being
+refused on sight (`--quiescence`).  `./winetest.sh` runs the shorter walk under
+wine-mono, inside the real prefix, where the framework's answers are the ones
+that count. Exit code 0 only if every assertion held.
+
+Run them under wine-mono as well as the host's Mono — the two runtimes disagree
 about details that only bite inside the prefix. `CLAUDE.md` explains which.
 
 ## Going deeper
 
 `CLAUDE.md` in this directory is the engineering reference: what the game's own
 IL requires, the traps in wine-mono that cost the most time, why the design is
-shaped this way, and what is still open.
+shaped this way, and what is still open.  `../INVESTIGATION-BLE.md` is the
+write-up of how this shape was reached: the freeze chain with the IL each step
+came from, the fixes with their measurements, and the field incidents closed
+along the way.

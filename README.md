@@ -76,6 +76,11 @@ most common reason a device does not show up.
 Several sensors at once are fine (a trainer and a heart-rate strap, say); each
 gets its own connection.
 
+A connect can take tens of seconds — a trainer only wakes when it is pedalled,
+and BlueZ needs its own time to link up and resolve services — but the game's
+interface stays responsive the whole while. A pairing screen that sits watching
+the list for a few seconds is the sensor being found, not the app freezing.
+
 ## Using a phone instead
 
 If you would rather bridge your sensors from a phone, the **MyWhoosh Link**

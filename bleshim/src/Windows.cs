@@ -64,9 +64,25 @@ using Windows.Storage.Streams;
 
 namespace Windows.Foundation
 {
-    /// A finished WinRT async operation.  Real IAsyncOperation is an interface;
-    /// nothing in WindowsConnectivity.dll cares, it only ever hands the value to
+    /// A WinRT async operation.  Real IAsyncOperation is an interface; nothing
+    /// in WindowsConnectivity.dll cares, it only ever hands the value to
     /// GetAwaiter, so a sealed class carrying the Task is enough.
+    ///
+    /// Two forms, because the game's call sites have two different natures:
+    ///
+    ///  * already finished -- built from a value, whose task is completed at
+    ///    construction.  Used where the answer is in memory or the one call
+    ///    the game synchronously Wait()s on (the radio poll), and nowhere
+    ///    else: anything slow made "already finished" runs its whole wait on
+    ///    the thread that called the WinRT method, which is how the game's
+    ///    UI thread used to freeze mid-connect.
+    ///
+    ///  * started now, finished later -- built from a Task, whose work runs
+    ///    on a thread-pool thread and completes the game's await exactly when
+    ///    the hardware is done, the way WinRT operations behave on Windows.
+    ///    Backed by Backend.Run, whose contract is that the task never
+    ///    throws: the game's async chains are async-void and would surface
+    ///    any exception as a crash.
     public sealed class IAsyncOperation<TResult>
     {
         public readonly Task<TResult> Task;
@@ -74,6 +90,11 @@ namespace Windows.Foundation
         public IAsyncOperation(TResult result)
         {
             Task = System.Threading.Tasks.Task.FromResult(result);
+        }
+
+        public IAsyncOperation(Task<TResult> task)
+        {
+            Task = task;
         }
     }
 
@@ -205,14 +226,23 @@ namespace Windows.Devices.Radios
         /// has to be reported, and reported off, or the user is told they have
         /// no Bluetooth at all.
         ///
-        /// This is the one question answered without the helper: it is asked
-        /// before anything else and sysfs is right there behind Wine's Z:.
+        /// This is also the one WinRT operation that must finish before it
+        /// returns: BluetoothProgram::IsBluetoothEnabled awaits it and then
+        /// Task.Wait()s it on the very same thread -- the game's only
+        /// Bluetooth sync-over-async wait (verified across its IL).  Deferred
+        /// here and the whole manager would deadlock at startup and every
+        /// poll after it.  That is what makes this the radios path's
+        /// constraint, and why the whole chain is tuned for it: the helper
+        /// serves the request from an in-memory cache, Backend bounds the
+        /// wait to InlineTimeoutMs and falls back to its last snapshot, so
+        /// this inline answer costs the caller microseconds in every state
+        /// the machine can be in.
         public static IAsyncOperation<IReadOnlyList<Radio>> GetRadiosAsync()
         {
             var radios = new List<Radio>();
             foreach (var adapter in Backend.Radios())
                 radios.Add(new Radio(adapter.Key, adapter.Value));
-            if (radios.Count == 0) Backend.Log("no Bluetooth adapter in /sys/class/bluetooth");
+            if (radios.Count == 0) Backend.Log("no powered Bluetooth radio visible to the helper");
             return new IAsyncOperation<IReadOnlyList<Radio>>(radios);
         }
 
@@ -274,52 +304,78 @@ namespace Windows.Devices.Bluetooth
         /// before the link is up and the services have resolved.  A device that
         /// cannot be reached comes back as null, which is what the game handles
         /// on Windows for a sensor that has gone away.
+        ///
+        /// The wait happens on a thread-pool thread, not on whoever called
+        /// this -- which on the connection path is the game's UI thread, and
+        /// under a sleeping trainer or an arguing phone the connect takes ten
+        /// to seventy seconds.  The game's own await chain is async-void, so
+        /// parking its continuation is exactly how it would behave on
+        /// Windows; making the operation "already finished" instead is what
+        /// used to run the whole wait on the window's thread.
+        ///
+        /// The budget is generous on purpose: the helper's own connect work
+        /// (an advertisement wait, BlueZ's link timeout, GATT resolution) can
+        /// total a minute for a device that is only just waking.  Timing out
+        /// here does not make the helper stop, it just makes the game give up
+        /// on a reply that would still have been good.
         public static IAsyncOperation<BluetoothLEDevice> FromBluetoothAddressAsync(ulong address)
         {
             string mac = Addresses.ToMac(address);
-            var reply = Backend.Call("op", "connect", "addr", mac);
-            if (reply == null)
-            {
-                Backend.Log("connect to " + mac + " failed");
-                return new IAsyncOperation<BluetoothLEDevice>(null);
-            }
+            return new IAsyncOperation<BluetoothLEDevice>(Backend.Run(
+                delegate
+                {
+                    var reply = Backend.CallBounded(Backend.ConnectTimeoutMs, "op", "connect", "addr", mac);
+                    if (reply == null)
+                    {
+                        Backend.Log("connect to " + mac + " failed");
+                        return null;
+                    }
 
-            string deviceName = Json.Str(reply, "name", string.Empty);
-            BluetoothLEDevice device;
-            lock (Live)
-            {
-                if (!Live.TryGetValue(mac, out device))
-                {
-                    device = new BluetoothLEDevice(mac, deviceName);
-                    Live[mac] = device;
-                }
-                else
-                {
-                    device.name = deviceName;
-                    device.connected = true;
-                }
-            }
-            Backend.Log("connected to " + mac + " (" + deviceName + ")");
-            return new IAsyncOperation<BluetoothLEDevice>(device);
+                    string deviceName = Json.Str(reply, "name", string.Empty);
+                    BluetoothLEDevice device;
+                    lock (Live)
+                    {
+                        if (!Live.TryGetValue(mac, out device))
+                        {
+                            device = new BluetoothLEDevice(mac, deviceName);
+                            Live[mac] = device;
+                        }
+                        else
+                        {
+                            device.name = deviceName;
+                            device.connected = true;
+                        }
+                    }
+                    Backend.Log("connected to " + mac + " (" + deviceName + ")");
+                    return device;
+                },
+                () => null));
         }
 
         public IAsyncOperation<GattDeviceServicesResult> GetGattServicesAsync(BluetoothCacheMode cacheMode)
         {
-            var reply = Backend.Call("op", "services", "addr", Address);
-            if (reply == null)
-                return new IAsyncOperation<GattDeviceServicesResult>(
-                    new GattDeviceServicesResult(GattCommunicationStatus.Unreachable, new GattDeviceService[0]));
+            var device = this;
+            return new IAsyncOperation<GattDeviceServicesResult>(Backend.Run(
+                delegate
+                {
+                    var reply = Backend.Call("op", "services", "addr", device.Address);
+                    var services = new List<GattDeviceService>();
+                    if (reply == null)
+                        return new GattDeviceServicesResult(
+                            GattCommunicationStatus.Unreachable, services);
 
-            var services = new List<GattDeviceService>();
-            foreach (object entry in Json.Arr(reply, "services"))
-            {
-                var o = Json.Obj(entry);
-                Guid uuid;
-                if (!Guid.TryParse(Json.Str(o, "uuid", ""), out uuid)) continue;
-                services.Add(new GattDeviceService(this, uuid));
-            }
-            return new IAsyncOperation<GattDeviceServicesResult>(
-                new GattDeviceServicesResult(GattCommunicationStatus.Success, services));
+                    foreach (object entry in Json.Arr(reply, "services"))
+                    {
+                        var o = Json.Obj(entry);
+                        Guid uuid;
+                        if (!Guid.TryParse(Json.Str(o, "uuid", ""), out uuid)) continue;
+                        services.Add(new GattDeviceService(device, uuid));
+                    }
+                    return new GattDeviceServicesResult(
+                        GattCommunicationStatus.Success, services);
+                },
+                () => new GattDeviceServicesResult(
+                    GattCommunicationStatus.Unreachable, new GattDeviceService[0])));
         }
 
         public string Name { get { return name; } }
@@ -351,10 +407,33 @@ namespace Windows.Devices.Bluetooth
         /// Disposing a BluetoothLEDevice releases the link on Windows, and the
         /// game disposes when the user disconnects a sensor -- so this really
         /// disconnects, or a sensor could never be handed back to another app.
+        ///
+        /// Two halves, in the order that keeps everyone honest.  The status
+        /// handlers are told here, synchronously: once this object leaves
+        /// Live the backend's connection event can no longer find it, and a
+        /// subscriber must not depend on where the collection happens to
+        /// still be registered.  Then the real teardown runs on a worker
+        /// thread -- the game invokes this from its UI thread, and BlueZ has
+        /// been known to take its time tearing a link down.
         public void Dispose()
         {
-            lock (Live) Live.Remove(Address);
-            Backend.Call("op", "disconnect", "addr", Address);
+            string address = Address;
+            lock (Live) Live.Remove(address);
+            connected = false;
+
+            Foundation.TypedEventHandler<BluetoothLEDevice, object>[] handlers;
+            lock (statusHandlers) handlers = statusHandlers.ToArray();
+            foreach (var h in handlers)
+            {
+                try { h(this, null); }
+                catch (Exception e) { Backend.Log("ConnectionStatusChanged handler threw: " + e); }
+            }
+
+            Backend.Run<object>(delegate
+            {
+                Backend.Call("op", "disconnect", "addr", address);
+                return null;
+            }, () => null);
         }
 
         static void OnBackendEvent(BackendEvent ev)
@@ -465,7 +544,12 @@ namespace Windows.Devices.Bluetooth.Advertisement
                 Running.Add(this);
                 if (Running.Count > 1) return;
             }
-            if (Backend.Call("op", "scan", "enable", true) == null)
+            // Inline but bounded: the helper answers scanning from its main
+            // loop in a few milliseconds at most, and the game asks from its
+            // UI thread.  The small budget exists for the one bad case, a
+            // wedged helper -- better a pairing screen that reports "stopped"
+            // than a window stopped with it.
+            if (Backend.CallBounded(Backend.InlineScanTimeoutMs, "op", "scan", "enable", true) == null)
             {
                 Backend.Log("scan could not be started");
                 RaiseStopped();
@@ -480,7 +564,7 @@ namespace Windows.Devices.Bluetooth.Advertisement
                 if (!Running.Remove(this)) return;
                 last = Running.Count == 0;
             }
-            if (last) Backend.Call("op", "scan", "enable", false);
+            if (last) Backend.CallBounded(Backend.InlineScanTimeoutMs, "op", "scan", "enable", false);
             RaiseStopped();
         }
 
@@ -671,31 +755,39 @@ namespace Windows.Devices.Bluetooth.GenericAttributeProfile
 
         public Foundation.IAsyncOperation<GattReadResult> ReadValueAsync(BluetoothCacheMode cacheMode)
         {
-            var reply = Backend.Call("op", "read", "addr", device.Address, "char", uuid.ToString("D"));
-            if (reply == null)
-                return new Foundation.IAsyncOperation<GattReadResult>(
-                    new GattReadResult(GattCommunicationStatus.Unreachable, new byte[0]));
+            var deviceHandle = this.device;
+            var characteristicUuid = this.uuid;
+            return new Foundation.IAsyncOperation<GattReadResult>(Backend.Run(
+                delegate
+                {
+                    var reply = Backend.Call("op", "read", "addr", deviceHandle.Address,
+                                             "char", characteristicUuid.ToString("D"));
+                    if (reply == null)
+                        return new GattReadResult(GattCommunicationStatus.Unreachable, new byte[0]);
 
-            byte[] value;
-            try { value = Json.FromHex(Json.Str(reply, "value", "")); }
-            catch (FormatException e)
-            {
-                Backend.Log("bad read payload for " + uuid + ": " + e.Message);
-                return new Foundation.IAsyncOperation<GattReadResult>(
-                    new GattReadResult(GattCommunicationStatus.ProtocolError, new byte[0]));
-            }
-            return new Foundation.IAsyncOperation<GattReadResult>(
-                new GattReadResult(GattCommunicationStatus.Success, value));
+                    byte[] value;
+                    try { value = Json.FromHex(Json.Str(reply, "value", "")); }
+                    catch (FormatException e)
+                    {
+                        Backend.Log("bad read payload for " + characteristicUuid + ": " + e.Message);
+                        return new GattReadResult(GattCommunicationStatus.ProtocolError, new byte[0]);
+                    }
+                    return new GattReadResult(GattCommunicationStatus.Success, value);
+                },
+                () => new GattReadResult(GattCommunicationStatus.Unreachable, new byte[0])));
         }
 
         public Foundation.IAsyncOperation<GattCommunicationStatus> WriteValueAsync(Storage.Streams.IBuffer value)
         {
-            return new Foundation.IAsyncOperation<GattCommunicationStatus>(Write(value));
+            return new Foundation.IAsyncOperation<GattCommunicationStatus>(
+                Backend.Run(() => Write(value), () => GattCommunicationStatus.Unreachable));
         }
 
         public Foundation.IAsyncOperation<GattWriteResult> WriteValueWithResultAsync(Storage.Streams.IBuffer value)
         {
-            return new Foundation.IAsyncOperation<GattWriteResult>(new GattWriteResult(Write(value)));
+            return new Foundation.IAsyncOperation<GattWriteResult>(Backend.Run(
+                delegate { return new GattWriteResult(Write(value)); },
+                () => new GattWriteResult(GattCommunicationStatus.Unreachable)));
         }
 
         /// WinRT's plain WriteValueAsync writes *with* response, and so does
@@ -724,31 +816,47 @@ namespace Windows.Devices.Bluetooth.GenericAttributeProfile
                 GattClientCharacteristicConfigurationDescriptorValue value)
         {
             bool enable = value != GattClientCharacteristicConfigurationDescriptorValue.None;
-            var reply = Backend.Call("op", "notify",
-                                     "addr", device.Address,
-                                     "char", uuid.ToString("D"),
-                                     "enable", enable);
-            if (reply == null)
-                return new Foundation.IAsyncOperation<GattCommunicationStatus>(
-                    GattCommunicationStatus.Unreachable);
+            var deviceHandle = this.device;
+            var characteristicUuid = this.uuid;
+            string key = Key;
+            return new Foundation.IAsyncOperation<GattCommunicationStatus>(Backend.Run(
+                delegate
+                {
+                    var reply = Backend.Call("op", "notify",
+                                             "addr", deviceHandle.Address,
+                                             "char", characteristicUuid.ToString("D"),
+                                             "enable", enable);
+                    if (reply == null)
+                    {
+                        // A refused reply is logged by Backend with the reason;
+                        // an unanswered one (no helper, socket down) would fail
+                        // silently here.  Naming the miss matters: a disappeared
+                        // subscription is indistinguishable from a device the
+                        // game has decided not to use.
+                        Backend.Log("subscribe to " + deviceHandle.Address + "/"
+                                    + characteristicUuid + " unanswered by the helper");
+                        return GattCommunicationStatus.Unreachable;
+                    }
 
-            lock (Subscribed)
-            {
-                List<GattCharacteristic> subscribers;
-                if (!Subscribed.TryGetValue(Key, out subscribers))
-                    Subscribed[Key] = subscribers = new List<GattCharacteristic>();
-                if (enable)
-                {
-                    if (!subscribers.Contains(this)) subscribers.Add(this);
-                }
-                else
-                {
-                    subscribers.Remove(this);
-                }
-            }
-            Backend.Log((enable ? "subscribed to " : "unsubscribed from ") + uuid
-                        + " on " + device.Address);
-            return new Foundation.IAsyncOperation<GattCommunicationStatus>(GattCommunicationStatus.Success);
+                    lock (Subscribed)
+                    {
+                        List<GattCharacteristic> subscribers;
+                        if (!Subscribed.TryGetValue(key, out subscribers))
+                            Subscribed[key] = subscribers = new List<GattCharacteristic>();
+                        if (enable)
+                        {
+                            if (!subscribers.Contains(this)) subscribers.Add(this);
+                        }
+                        else
+                        {
+                            subscribers.Remove(this);
+                        }
+                    }
+                    Backend.Log((enable ? "subscribed to " : "unsubscribed from ") + characteristicUuid
+                                + " on " + deviceHandle.Address);
+                    return GattCommunicationStatus.Success;
+                },
+                () => GattCommunicationStatus.Unreachable));
         }
 
         public EventRegistrationToken add_ValueChanged(
@@ -822,28 +930,34 @@ namespace Windows.Devices.Bluetooth.GenericAttributeProfile
         public Foundation.IAsyncOperation<GattCharacteristicsResult> GetCharacteristicsAsync(
             BluetoothCacheMode cacheMode)
         {
-            var reply = Backend.Call("op", "chars", "addr", device.Address, "service", uuid.ToString("D"));
-            var found = new List<GattCharacteristic>();
-            if (reply == null)
-                return new Foundation.IAsyncOperation<GattCharacteristicsResult>(
-                    new GattCharacteristicsResult(found));
-
-            foreach (object entry in Json.Arr(reply, "chars"))
-            {
-                var o = Json.Obj(entry);
-                Guid charUuid;
-                if (!Guid.TryParse(Json.Str(o, "uuid", ""), out charUuid)) continue;
-
-                var flags = new List<string>();
-                foreach (object f in Json.Arr(o, "flags"))
+            var device = this.device;
+            var serviceUuid = uuid;
+            return new Foundation.IAsyncOperation<GattCharacteristicsResult>(Backend.Run(
+                delegate
                 {
-                    string s = f as string;
-                    if (s != null) flags.Add(s);
-                }
-                found.Add(new GattCharacteristic(device, charUuid, Flags.ToProperties(flags)));
-            }
-            return new Foundation.IAsyncOperation<GattCharacteristicsResult>(
-                new GattCharacteristicsResult(found));
+                    var reply = Backend.Call("op", "chars", "addr", device.Address,
+                                             "service", serviceUuid.ToString("D"));
+                    var found = new List<GattCharacteristic>();
+                    if (reply == null)
+                        return new GattCharacteristicsResult(found);
+
+                    foreach (object entry in Json.Arr(reply, "chars"))
+                    {
+                        var o = Json.Obj(entry);
+                        Guid charUuid;
+                        if (!Guid.TryParse(Json.Str(o, "uuid", ""), out charUuid)) continue;
+
+                        var flags = new List<string>();
+                        foreach (object f in Json.Arr(o, "flags"))
+                        {
+                            string s = f as string;
+                            if (s != null) flags.Add(s);
+                        }
+                        found.Add(new GattCharacteristic(device, charUuid, Flags.ToProperties(flags)));
+                    }
+                    return new GattCharacteristicsResult(found);
+                },
+                () => new GattCharacteristicsResult(new GattCharacteristic[0])));
         }
 
         /// The link belongs to the device, so disposing one service must not
