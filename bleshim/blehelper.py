@@ -74,6 +74,30 @@ def trace(fmt, *a):
         log(fmt, *a)
 
 
+def select_adapter(objects, requested="auto"):
+    """Select a powered adapter without assuming Linux assigned it hci0."""
+    adapters = {str(path): interfaces[ADAPTER_IFACE]
+                for path, interfaces in objects.items() if ADAPTER_IFACE in interfaces}
+    if requested != "auto":
+        path = "/org/bluez/" + requested
+        if path not in adapters:
+            raise BleError("no BlueZ adapter %s; check bluetoothctl list" % requested)
+        if not adapters[path].get("Powered", False):
+            raise BleError("Bluetooth adapter %s is powered off" % requested)
+        return requested
+    powered = sorted(path for path, props in adapters.items() if props.get("Powered", False))
+    if not powered:
+        raise BleError("no powered Bluetooth adapter; check bluetoothctl list / bluetoothctl power on")
+    # hci0 was the only default before auto-selection; a machine with a second
+    # powered adapter that worked then must keep working.
+    if len(powered) > 1 and "/org/bluez/hci0" in powered:
+        return "hci0"
+    if len(powered) != 1:
+        raise BleError("multiple powered Bluetooth adapters (%s); set MYWHOOSH_BLE_ADAPTER or --adapter"
+                       % ", ".join(path.rsplit("/", 1)[-1] for path in powered))
+    return powered[0].rsplit("/", 1)[-1]
+
+
 class Bluez:
     """BlueZ, in the few verbs the shim needs of it."""
 
@@ -108,6 +132,12 @@ class Bluez:
         return "RSSI" in d or bool(d.get("Connected"))
 
     def adapter(self):
+        props = self.objects().get(self.adapter_path, {}).get(ADAPTER_IFACE)
+        if props is None:
+            raise BleError("Bluetooth adapter %s disappeared; it is used again if it returns under "
+                           "that name, otherwise relaunch the game" % self.adapter_path.rsplit("/", 1)[-1])
+        if not props.get("Powered", False):
+            raise BleError("Bluetooth adapter is powered off")
         return dbus.Interface(self.bus.get_object(BLUEZ, self.adapter_path), ADAPTER_IFACE)
 
     def radios(self):
@@ -132,14 +162,20 @@ class Bluez:
     # ------------------------------------------------------------ discovery
 
     def start_scan(self):
+        adapter = self.adapter()
         if self.scanning:
             return
         try:
-            self.adapter().SetDiscoveryFilter({"Transport": "le", "DuplicateData": dbus.Boolean(True)})
+            # Introspection can disappear during a controller reset. An explicit
+            # a{sv} signature prevents dbus-python inferring a string dictionary
+            # and throwing TypeError before the server can return a D-Bus error.
+            adapter.SetDiscoveryFilter(
+                dbus.Dictionary({"Transport": "le", "DuplicateData": dbus.Boolean(True)}, signature="sv"),
+                signature="a{sv}")
         except dbus.DBusException as e:
             log("discovery filter refused (%s), scanning anyway", e.get_dbus_name())
         try:
-            self.adapter().StartDiscovery()
+            adapter.StartDiscovery()
         except dbus.DBusException as e:
             if e.get_dbus_name() != "org.bluez.Error.InProgress":
                 raise
@@ -152,8 +188,8 @@ class Bluez:
         self.scanning = False
         try:
             self.adapter().StopDiscovery()
-        except dbus.DBusException as e:
-            trace("StopDiscovery: %s", e.get_dbus_name())
+        except (BleError, dbus.DBusException) as e:
+            trace("StopDiscovery: %s", e)
         log("scan stopped")
 
     def wait_for_advert(self, addr, seconds):
@@ -573,6 +609,18 @@ class Server:
             self.advert(d)
 
     def on_interfaces_removed(self, path, ifaces):
+        if str(path) == self.bluez.adapter_path and ADAPTER_IFACE in ifaces:
+            self.bluez.scanning = False
+            self.subscribed.clear()
+            self.char_addr.clear()
+            self.silent.clear()
+            for addr, connected in list(self.connected.items()):
+                if connected:
+                    self.send({"ev": "connection", "addr": addr, "connected": False})
+            self.connected.clear()
+            log("Bluetooth adapter %s disappeared; it is used again if it returns under that name, "
+                "otherwise relaunch the game", self.bluez.adapter_path.rsplit("/", 1)[-1])
+            return
         # BlueZ removes a non-bonded device's object when it stops advertising,
         # which is what a sleeping trainer looks like.  The game hears about it
         # as a disconnection, and reconnecting is its decision, not ours.
@@ -589,11 +637,16 @@ def list_devices(bluez):
     bluez.start_scan()
     loop = GLib.MainLoop()
     GLib.timeout_add_seconds(8, lambda: (loop.quit(), False)[1])
-    loop.run()
-    bluez.stop_scan()
+    try:
+        loop.run()
+        # BlueZ can clear RSSI when discovery stops. Keep the observed snapshot
+        # or --list can report nothing despite a successful scan.
+        objects = bluez.objects()
+    finally:
+        bluez.stop_scan()
 
     rows = []
-    for path, ifaces in sorted(bluez.objects().items()):
+    for path, ifaces in sorted(objects.items()):
         d = ifaces.get(DEVICE_IFACE)
         if not d or not path.startswith(bluez.adapter_path + "/"):
             continue
@@ -615,21 +668,27 @@ def main():
     global verbose
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     ap.add_argument("--port", type=int, default=27019, help="loopback port to serve on")
-    ap.add_argument("--adapter", default="hci0", help="BlueZ adapter (default hci0)")
+    ap.add_argument("--adapter", default="auto", help="BlueZ adapter (default: the sole powered adapter)")
+    ap.add_argument("--check-adapter", action="store_true",
+                    help="print the selected powered adapter and exit without scanning")
     ap.add_argument("--list", action="store_true", help="scan, print what is on the air, exit")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     verbose = args.verbose
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    bus = dbus.SystemBus()
-    bluez = Bluez(bus, args.adapter)
     try:
-        bluez.objects()
+        bus = dbus.SystemBus()
+        objects = dbus.Interface(bus.get_object(BLUEZ, "/"), OM_IFACE).GetManagedObjects()
+        adapter = select_adapter(objects, args.adapter)
     except dbus.DBusException as e:
         raise SystemExit("cannot talk to BlueZ (%s) -- is bluetoothd running?" % e.get_dbus_name())
-    if bluez.adapter_path not in bluez.objects():
-        raise SystemExit("no adapter at %s -- try --adapter" % bluez.adapter_path)
+    except BleError as e:
+        raise SystemExit(str(e))
+    if args.check_adapter:
+        print(adapter)
+        return
+    bluez = Bluez(bus, adapter)
 
     if args.list:
         list_devices(bluez)

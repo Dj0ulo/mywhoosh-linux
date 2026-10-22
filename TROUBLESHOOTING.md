@@ -40,7 +40,7 @@ The previous run is kept beside it as `session.log.prev`.
 | A phone or watch shows in `bluetoothctl` but not in the game | Normal. The game only lists devices advertising a fitness service |
 | The game says Bluetooth is off | The helper is not reachable, or the adapter is off: `bluetoothctl power on` |
 | Lutris is a Flatpak and there is no adapter | The host needs two Python packages; see the Flatpak note in the [README](README.md#before-you-start) |
-| The wrong adapter is used, with more than one | Set `MYWHOOSH_BLE_ADAPTER` (for example `hci1`); see [`lutris/README.md`](lutris/README.md) |
+| The wrong adapter is used, with more than one | The default is the only powered adapter, or `hci0` if several are. Set `MYWHOOSH_BLE_ADAPTER` (for example `hci1`); see [`lutris/README.md`](lutris/README.md) |
 
 When opening an issue, attach `session.log`.
 
@@ -65,6 +65,11 @@ back for a while:
 bluetoothctl power off
 bluetoothctl power on
 ```
+
+A reset can bring the adapter back under a new name (`hci0` becoming `hci1`,
+say; `bluetoothctl list` shows it). The helper keeps using an adapter that
+returns under the same name, but a renamed one needs the game closed and
+relaunched, which picks the powered adapter again.
 
 To keep the adapter awake permanently, disable USB autosuspend for it. How to do
 that depends on your distribution and on any power-management tool you run (TLP,

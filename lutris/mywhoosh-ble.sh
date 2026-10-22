@@ -21,7 +21,7 @@ HELPER="$DIR/blehelper.py"
 PIDFILE="$DIR/blehelper.pid"
 LOG="${MYWHOOSH_SHIM_LOG:-$DIR/session.log}"
 PORT="${MYWHOOSH_BLE_PORT:-27019}"
-ADAPTER="${MYWHOOSH_BLE_ADAPTER:-hci0}"
+ADAPTER="${MYWHOOSH_BLE_ADAPTER:-auto}"
 # The assemblies the game loads instead of WinRT live beside this script, and
 # the installer's MONO_PATH is what points mono here -- as a Windows path,
 # because that is how mono inside the prefix reads it.
@@ -80,19 +80,10 @@ port_open() {
 
 say() { echo "[mywhoosh-ble] $*"; }
 
-# The BlueZ probe, as one argument rather than a heredoc: stdin is not worth
-# relying on when the command may be forwarded to the host by flatpak-spawn.
-BLUEZ_PROBE='
-import sys, dbus
-objs = dbus.SystemBus().get_object("org.bluez", "/").GetManagedObjects(
-    dbus_interface="org.freedesktop.DBus.ObjectManager")
-sys.exit(0 if "/org/bluez/" + sys.argv[1] in objs else 1)
-'
-
 # Both at install time and at launch: the same questions, asked of the machine
 # rather than of the user.
 deps_report() {
-    local ok=0 ver
+    local ok=0 ver selected err
 
     if [ "$IN_FLATPAK" = 1 ]; then
         if [ -n "$HOST" ]; then
@@ -129,14 +120,22 @@ deps_report() {
         ok=1
     fi
 
-    if $HOST python3 -c "$BLUEZ_PROBE" "$ADAPTER" 2>/dev/null; then
+    # Use the helper's selection logic on the host, including under Flatpak.
+    # Preserve explicit overrides; auto selects again at every game launch.
+    # Only stdout is the answer: anything on stderr (a warning, flatpak-spawn
+    # chatter) must not end up in --adapter, and a traceback is one line too many.
+    err=$(mktemp)
+    if selected=$($HOST python3 "$HELPER" --check-adapter --adapter "$ADAPTER" 2>"$err") \
+       && [ -n "$selected" ]; then
+        ADAPTER="$selected"
         say "ok    BlueZ adapter $ADAPTER"
     else
-        say "WARN  no BlueZ adapter $ADAPTER -- is bluetoothd running, and the adapter on?"
+        say "WARN  $(tail -n 1 "$err")"
         say "      check with:  bluetoothctl list  /  bluetoothctl power on"
         say "      another adapter: set MYWHOOSH_BLE_ADAPTER in Lutris' environment variables"
         ok=1
     fi
+    rm -f "$err"
 
     return $ok
 }

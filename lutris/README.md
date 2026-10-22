@@ -105,7 +105,7 @@ Two environment variables, settable in Lutris under *Configure → System option
 
 | Variable | Default | |
 |---|---|---|
-| `MYWHOOSH_BLE_ADAPTER` | `hci0` | Which BlueZ adapter to use |
+| `MYWHOOSH_BLE_ADAPTER` | `auto` | Use the sole powered BlueZ adapter, or `hci0` if several are; set an explicit `hciN` to choose another |
 | `MYWHOOSH_BLE_PORT` | `27019` | The loopback port the two halves meet on |
 | `MYWHOOSH_SHIM_LOG` | `$GAMEDIR/bleshim/session.log` | Where every layer logs |
 
@@ -113,6 +113,14 @@ The log is the diagnostic tool: the helper, the shim inside the prefix and the
 export shim all write to that one file, each with its own tag, and the
 install-time `check` writes its report there too. The previous
 run is kept beside it as `session.log.prev`.
+
+Adapter selection runs on every launch, so a controller renumbered from `hci0`
+to `hci5` still works. Explicit overrides are respected and must name a powered
+adapter. If a controller resets during a ride, the helper reports the loss and
+clears its old scan and subscription state. A controller that returns under the
+same name is used again without a restart; one that returns renumbered needs the
+game closed and relaunched. See [Bluetooth recovery](../bleshim/README.md#bluetooth-recovery)
+for scans that return nothing even outside MyWhoosh.
 
 ## Changing the shim
 

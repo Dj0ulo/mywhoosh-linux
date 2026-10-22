@@ -146,6 +146,45 @@ The log is the diagnostic tool. Every layer writes to it with its own tag —
 `[blehelper]`, `[bleshim]`, `[exportshim]` — so you can see how far a request
 got.
 
+## Bluetooth recovery
+
+The helper defaults to the sole powered BlueZ adapter, including names such as
+`hci5`. With several powered adapters it keeps `hci0` if that is one of them;
+otherwise select one using `--adapter hciN` or Lutris' `MYWHOOSH_BLE_ADAPTER`
+environment variable. Check selection without
+starting a scan or connecting to a sensor:
+
+```sh
+python3 bleshim/blehelper.py --check-adapter
+```
+
+Run these examples from the repository root. An installed release has
+`blehelper.py` under `<installation>/bleshim/` instead. Source changes take effect
+only in a build/deployment using them; the Lutris installer still downloads its
+pinned release.
+
+If no sensors appear, close MyWhoosh and other trainer apps, wake the trainer,
+and check Linux discovery directly:
+
+```sh
+bluetoothctl --timeout 20 scan le
+journalctl -k --since '-5 min' | grep -Ei 'Bluetooth|hci[0-9]|btusb'
+```
+
+Command timeouts and USB resets here are below the Wine shim. If the
+controller comes back under the same name, the helper uses it again and the game
+can scan without a restart. A reset can also change its index (`hci0` becoming
+`hci5`); then close the game and relaunch so the powered adapter is selected again. The launcher
+does not reset the adapter automatically during a ride.
+
+Regression tests for adapter selection, disappearing controllers, D-Bus filter
+marshalling and scan diagnostics run without Bluetooth hardware (Python
+`dbus-python` and `PyGObject` are required):
+
+```sh
+python3 -m unittest discover -s bleshim/tests -v
+```
+
 ## Files
 
 | File | What it is |
