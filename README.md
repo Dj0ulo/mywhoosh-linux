@@ -76,6 +76,9 @@ most common reason a device does not show up.
 Several sensors at once are fine (a trainer and a heart-rate strap, say); each
 gets its own connection.
 
+Still nothing? [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) goes through it step
+by step.
+
 ## Using a phone instead
 
 If you would rather bridge your sensors from a phone, the **MyWhoosh Link**

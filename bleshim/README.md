@@ -128,6 +128,10 @@ And one thing the prefix must **not** have:
 
 ## When it does not work
 
+[`../TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) is the version for players,
+including what to do when Linux itself cannot scan. This table is for working
+on the shim.
+
 | What you see | What it usually is |
 |---|---|
 | Nothing at all in the log | The helper is not running, or the game is not reaching the sensor screen |
