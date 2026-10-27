@@ -65,6 +65,15 @@ Lutris, with separate prefixes.
 Launch it from Lutris like any other game. The Bluetooth helper starts with it
 and stops when you quit; there is nothing to run by hand.
 
+MyWhoosh refuses to start once a newer version is out, so each launch first asks
+the Microsoft Store, which takes a fraction of a second. When there is an
+update, a progress window appears and the new version is downloaded and
+installed before the game starts — a few minutes, during which Lutris itself
+looks frozen. If the check or the download fails, or you cancel it, the
+installed version starts as it is, and an interrupted download picks up where
+it stopped at the next launch. To turn this off, set `MYWHOOSH_AUTO_UPDATE=0`
+in the game's environment variables (*Configure → System options*).
+
 ## Connect your trainer and sensors
 
 Pair them from MyWhoosh's own device screen, exactly as you would on Windows.
@@ -102,7 +111,7 @@ they change.
 
 | Directory | What it is |
 |---|---|
-| [`lutris/`](lutris/README.md) | The Lutris installers, and the script that runs the helper beside the game |
+| [`lutris/`](lutris/README.md) | The Lutris installers, the script that runs the helper beside the game, and the game updater |
 | [`bleshim/`](bleshim/README.md) | The Bluetooth support: the library the game loads, plus the Linux helper that speaks to BlueZ |
 | [`exportshim/`](exportshim/README.md) | Four game entry points Wine's .NET runtime cannot handle, replaced in memory |
 | [`winmd/`](winmd/README.md) | The same library with Bluetooth switched off — what the game needs just to start |

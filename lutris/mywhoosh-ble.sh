@@ -2,7 +2,8 @@
 # The Linux half of the Bluetooth stack, as Lutris drives it.
 #
 #   mywhoosh-ble.sh check     once, at the end of the install
-#   mywhoosh-ble.sh start     Lutris' pre-launch script
+#   mywhoosh-ble.sh start     Lutris' pre-launch script: updates the game,
+#                             then starts the helper
 #   mywhoosh-ble.sh stop      Lutris' post-exit script
 #
 # The installer copies this next to blehelper.py inside the game directory and
@@ -18,6 +19,7 @@ set -u
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$DIR/blehelper.py"
+UPDATER="$DIR/mywhoosh-update.py"
 PIDFILE="$DIR/blehelper.pid"
 LOG="${MYWHOOSH_SHIM_LOG:-$DIR/session.log}"
 PORT="${MYWHOOSH_BLE_PORT:-27019}"
@@ -148,6 +150,25 @@ shim_reachable() {
     [ -f "$MONO_TREE/mono/4.5/mscorlib.dll" ] && [ -f "$MONO_TREE/Windows.dll" ]
 }
 
+# The game refuses to start once the Store has a newer build, and nothing else
+# in a Lutris install can update it.  The updater checks in a fraction of a
+# second, shows its own progress when there is something to download, and
+# leaves the installed game whole whatever happens -- so whatever it returns,
+# the launch goes on.  It finds the game (MyWhoosh or MyWhooshHD) itself.
+update_game() {
+    case "${MYWHOOSH_AUTO_UPDATE:-1}" in
+    0|no|false|off)
+        say "game updates are off (MYWHOOSH_AUTO_UPDATE=$MYWHOOSH_AUTO_UPDATE)" | tee -a "$LOG"
+        return ;;
+    esac
+    if [ ! -f "$UPDATER" ]; then
+        say "no game updater in $DIR -- reinstall to get one" | tee -a "$LOG"
+        return
+    fi
+    python3 -I "$UPDATER" "$(dirname "$DIR")" ||
+        say "starting the installed game as it is" | tee -a "$LOG"
+}
+
 notify() {
     # Through the host as well: the Flatpak runtime may have no notify-send,
     # and the manifest asks for no notification name on the session bus.
@@ -182,11 +203,16 @@ check)
 
 start)
     clean_env
+    # Lutris starts this in the game's directory, which an update replaces:
+    # left there, every command after it would run in a deleted directory,
+    # and flatpak-spawn hands that cwd on to the host.
+    cd "$DIR" || cd /
     # Rotate before starting, but only if we are the ones starting: a helper
     # already running holds the old file open, and renaming it underneath would
     # send the rest of its output to a file named .prev.
     if port_open; then
         say "a helper is already listening on 127.0.0.1:$PORT -- leaving it alone"
+        update_game
         exit 0
     fi
 
@@ -194,6 +220,7 @@ start)
     # (a sensor that never appears) are read after quitting the game.
     [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev" 2>/dev/null
     say "log: $LOG"
+    update_game
 
     # Not a Bluetooth problem but a fatal one: without the shim the game dies
     # at its first Bluetooth call, with a TypeLoadException naming `Windows`.

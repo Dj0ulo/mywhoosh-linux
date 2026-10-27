@@ -11,6 +11,13 @@
 # the prefix speak a private protocol over loopback, and fetching them
 # separately is how they end up being different builds of it.
 #
+# The game updater (lutris/mywhoosh-update.py) resolves downloads with the
+# Microsoft Store downloader the installer uses, so a copy ships beside it --
+# pinned, because it runs on every machine with an update to fetch.  Bump both
+# lines together, after reading the new commit.
+DOWNLOADER_COMMIT=4dbdee1ed08e3c24ff34a41fa92f3407188a24ad
+DOWNLOADER_SHA256=01a524cdc2bd48863da4f86eb9eebb2b9f0f061eef32ef9f983d2ac92b63a7b9
+#
 # Env overrides: GAME_LIBS (passed through to bleshim/build.sh, which checks the
 # shim's surface against the game's own metadata -- worth setting, since a
 # missing member is a MissingMethodException in the middle of a ride).
@@ -47,8 +54,18 @@ cp -f bleshim/build/Windows.dll \
       exportshim/build/MyWhooshShim.dll \
       bleshim/blehelper.py \
       lutris/mywhoosh-ble.sh \
+      lutris/mywhoosh-update.py \
       "$stage/"
-chmod +x "$stage/blehelper.py" "$stage/mywhoosh-ble.sh"
+chmod +x "$stage/blehelper.py" "$stage/mywhoosh-ble.sh" "$stage/mywhoosh-update.py"
+
+mkdir -p build/cache
+downloader="build/cache/ms_store_download-$DOWNLOADER_COMMIT.py"
+if ! echo "$DOWNLOADER_SHA256  $downloader" | sha256sum -c --status 2>/dev/null; then
+    curl -fsSL -o "$downloader" \
+        "https://raw.githubusercontent.com/Dj0ulo/ms-store-download/$DOWNLOADER_COMMIT/ms_store_download.py"
+    echo "$DOWNLOADER_SHA256  $downloader" | sha256sum -c --quiet
+fi
+cp -f "$downloader" "$stage/ms_store_download.py"
 
 # The manifest is the only way a user can tell which build they are running:
 # the installer unpacks this into a prefix, where nothing else records where it

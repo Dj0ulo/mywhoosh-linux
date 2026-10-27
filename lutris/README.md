@@ -6,7 +6,8 @@ Two installer scripts and the small script that runs beside the game.
 |---|---|
 | `mywhoosh.yml` | Installs MyWhoosh from the Microsoft Store into a Wine prefix, with Bluetooth |
 | `mywhoosh-hd.yml` | The same for MyWhoosh HD — a different store id and directory, and its own vkd3d-proton: HD renders with D3D12, which Lutris' vkd3d v2.14 crashes at startup |
-| `mywhoosh-ble.sh` | Runs on the Linux side: checks the setup at install time, starts and stops the helper around the game |
+| `mywhoosh-ble.sh` | Runs on the Linux side: checks the setup at install time, updates the game and starts the helper before it, stops the helper after |
+| `mywhoosh-update.py` | Brings an installed game up to the Microsoft Store's version; standalone, so anything that launches the game can run it |
 | `debug.sh` | Builds, removes the previous debug install, and runs `mywhoosh.yml` (`--hd`: `mywhoosh-hd.yml`) rewritten to install this checkout's build and the MSIX cached in `../downloads/`: a fresh install to try before a release |
 
 ```sh
@@ -67,6 +68,64 @@ the game from launching, and a problem at install time must not throw away a
 finished download; it says what is wrong (in the log, and through `notify-send`
 when there is a desktop to say it to) and gets out of the way.
 
+## Updating the game
+
+MyWhoosh refuses to start once the Store has a newer build, and a Lutris install
+has no Store behind it: the installer downloads the package once. So `start`
+runs `mywhoosh-update.py` before anything else. It reads the edition from the
+installed `AppxManifest.xml` — `<Identity Name=… Version=…>` — so no game
+release ever needs a change here.
+
+**Where the Store's version comes from.** Measured from here:
+
+| Source | Time | What it gives |
+|---|---|---|
+| `displaycatalog.mp.microsoft.com/v7.0/products/<id>` | ~0.2 s | `PackageFullName` (`Name_6.2.3.0_x64__…`), SHA-256, sizes; TLS verifies |
+| Windows Update SOAP (what the downloader does) | 2.3–8 s | the same name and SHA-256, and the only download URL |
+| The game's own check | — | MyWhoosh's backend (`services`/`service20.mywhoosh.com`), behind Firebase auth, with its paths in the encrypted pak; it tells the game the version it *requires*, not what the Store can deliver |
+
+The catalog is the check; SOAP runs only when there is something to download,
+or as the check when the catalog is unreachable. The package URL is plain
+`http`, and `fe3.delivery.mp.microsoft.com` chains to a Microsoft root no Linux
+trust store has, so the downloader talks to it unverified. The package is
+installed only if its SHA-256 matches the catalog's.
+
+The updater has no network code of its own. The catalog check, the SOAP
+lookup, the resumable download and the extraction all go through
+[ms-store-download](https://github.com/Dj0ulo/ms-store-download)'s library API
+(`get_catalog_packages`, `get_download_links`, `download_package`,
+`extract_package`). What remains here is MyWhoosh-specific: editions, the exe
+rename, the staging and swap, and the UI. The downloader ships in the archive
+beside the updater, pinned by commit and hash in `../dist.sh`.
+
+**Never half a game.** The package is downloaded and unpacked in
+`drive_c/.MyWhoosh.update/` (`.MyWhooshHD.update/`), on the same filesystem as
+the game, and the exe is renamed there exactly as the installer renames it.
+Once all of that is synced, a `ready` marker is written, and the swap is two
+renames: game → `old/`, `new/` → game. Every run first finishes or rolls back
+what the last one left: a download resumes with a `Range` request, a half-unpacked
+`new/` is deleted, and a missing game is put back from `new/` (if `ready`) or
+`old/`. No game file is ever written in place. The game directory is replaced
+whole, and the result is byte-identical to a fresh install.
+
+**What the user sees.** Lutris 0.5 runs a waited pre-launch command on its GTK
+main thread and keeps its output for its own debug log, so during a download its
+window is frozen and nothing printed reaches the screen. The updater therefore
+opens its own `zenity --progress` window (with Cancel), and sends notifications
+through `notify-send` — through the host under Flatpak, like everything else
+here. Both are skipped when there is no display. Everything is logged to
+`MYWHOOSH_SHIM_LOG` with the tag `updater`.
+
+**Failures launch the game.** No network, a Store that does not answer, a full
+disk, a bad digest, Cancel: each is logged, and the installed game starts. It
+may refuse to run, but that is the game's decision, not ours. The update is
+also skipped while that game's binary is running.
+
+For a container or a script, `mywhoosh-update.py DIR` works on its own — `DIR`
+being the prefix, its `drive_c` or the game directory. `--check` only reports
+(exit 10 when an update is available), `--no-gui` drops the window and the
+notifications, and `--source catalog|soap` forces one source.
+
 ## Flatpak Lutris
 
 The sandbox is no place to reach Bluetooth from. The Flathub manifest grants no
@@ -108,6 +167,7 @@ Two environment variables, settable in Lutris under *Configure → System option
 | `MYWHOOSH_BLE_ADAPTER` | `auto` | Use the sole powered BlueZ adapter, or `hci0` if several are; set an explicit `hciN` to choose another |
 | `MYWHOOSH_BLE_PORT` | `27019` | The loopback port the two halves meet on |
 | `MYWHOOSH_SHIM_LOG` | `$GAMEDIR/bleshim/session.log` | Where every layer logs |
+| `MYWHOOSH_AUTO_UPDATE` | `1` | `0` skips the game update at launch |
 
 The log is the diagnostic tool: the helper, the shim inside the prefix and the
 export shim all write to that one file, each with its own tag, and the
@@ -125,9 +185,10 @@ for scans that return nothing even outside MyWhoosh.
 ## Changing the shim
 
 The installer downloads one archive — `mywhoosh-bleshim-<tag>.tar.gz`, a
-GitHub release asset holding the three assemblies, `blehelper.py` and this
-directory's `mywhoosh-ble.sh` — and `variables.shim_release` at the top of each
-`.yml` is the tag it fetches. One archive rather than five raw URLs because the
+GitHub release asset holding the three assemblies, `blehelper.py`, this
+directory's `mywhoosh-ble.sh` and `mywhoosh-update.py`, and the pinned Store
+downloader — and `variables.shim_release` at the top of each `.yml` is the tag
+it fetches. One archive rather than a handful of raw URLs because the
 helper and the shim inside the prefix speak a protocol between themselves:
 fetched separately, they eventually arrive as different builds of it.
 
@@ -138,8 +199,10 @@ than a branch tip:
 lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywhoosh.yml
 ```
 
-So a change under `../bleshim/src/`, `../exportshim/`, `blehelper.py` or
-`mywhoosh-ble.sh` reaches nobody until a release is cut:
+So a change under `../bleshim/src/`, `../exportshim/`, `blehelper.py`,
+`mywhoosh-ble.sh` or `mywhoosh-update.py` reaches nobody until a release is cut.
+That includes the updater itself: an install from before it has no update path
+except a reinstall.
 
 ```sh
 ../dist.sh                 # build and pack into ../build/, to test by hand
