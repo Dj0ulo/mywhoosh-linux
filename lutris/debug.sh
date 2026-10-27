@@ -51,9 +51,12 @@ sub(r"^version: .*$", "version: Local build")
 # Not listed under `files`: Lutris 0.5.14 fetches those with requests, which
 # has no file:// adapter.
 sub(r"^ *- shim: .*\n", "")
+# Lutris 0.5.14 crashes on an empty `files:` (it iterates None), so when the
+# shim was the only file (not in HD, which fetches vkd3d) the section goes too.
+text = re.sub(r"^  files:\n(?: *#.*\n)*(?=  \S)", "", text, flags=re.M)
 sub(r"^( *)file: shim$", lambda m: f"{m[1]}file: {repo}/build/mywhoosh-bleshim-debug.tar.gz")
-# The downloader skips a package already in its download directory when the
-# store's SHA256 matches, so a fresh prefix does not cost a 2 GB download.
+# The updater reuses a package already in its --download-dir when the
+# Store's SHA-256 matches, so a fresh prefix does not cost a 2 GB download.
 sub(r"\$CACHE\b", lambda m: f"{repo}/downloads", count=2)
 open(dst, "w").write(text)
 EOF

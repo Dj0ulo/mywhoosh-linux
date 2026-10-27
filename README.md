@@ -51,11 +51,11 @@ lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywh
 Lutris then does everything itself:
 
 1. creates a 64-bit Wine prefix,
-2. downloads the MyWhoosh package straight from the Microsoft Store,
-3. installs it into the prefix,
-4. adds the Bluetooth support to the prefix and puts the Linux-side helper next
-   to the game,
-5. wires that helper to start and stop with the game, and checks your setup.
+2. adds the Bluetooth support to the prefix and puts the Linux-side helper and
+   the game updater next to the game,
+3. downloads the MyWhoosh package straight from the Microsoft Store and
+   installs it into the prefix, in the same progress window as later updates,
+4. wires the helper to start and stop with the game, and checks your setup.
 
 Installing both editions side by side is fine — they are separate games in
 Lutris, with separate prefixes.

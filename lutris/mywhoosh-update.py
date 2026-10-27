@@ -2,6 +2,7 @@
 """Bring an installed MyWhoosh up to the Microsoft Store's version.
 
     mywhoosh-update.py [--check] [--no-gui] [--source auto|catalog|soap] DIR
+    mywhoosh-update.py --install PRODUCT_ID [--download-dir D] [--no-gui] GAMEDIR
 
 DIR is the game directory (drive_c/MyWhoosh or drive_c/MyWhooshHD), or a
 prefix or drive_c holding one.  The edition, and so the Store product, is read
@@ -11,10 +12,13 @@ new release needs no change to this file.
 The game refuses to start once the Store has a newer build, and a Lutris
 install has no Store to update it: the installer downloads the package once.
 `mywhoosh-ble.sh start` runs this before every launch; a container entrypoint
-can run it the same way.
+can run it the same way.  The installers run it too, with --install, for the
+first download: the same Store lookup, digest check, swap and progress window,
+into a game directory that is still empty.
 
 Exit status: 0 up to date or updated, 1 failed (the installed game is left
-exactly as it was), 2 usage, 10 with --check when an update is available.
+exactly as it was; with --install, nothing is installed), 2 usage, 10 with
+--check when an update is available.
 Nothing here raises: every failure is logged and the installed game launches.
 
 Where the version comes from
@@ -364,22 +368,35 @@ def download_progress(ui, label):
     return progress
 
 
-def update(game, ui, source, check_only):
-    name, have = read_identity(game)
-    if name not in EDITIONS:
-        raise Failed("unknown package %s in %s" % (name, game))
+def update(game, ui, source, check_only, install=None, download_dir=None):
+    """Bring GAME up to the Store's version -- or, with install=<product id>
+    and no game there yet, put the Store's version there in the first place."""
+    if install and not (game / "AppxManifest.xml").is_file():
+        name = next((n for n, (sid, _) in EDITIONS.items() if sid == install.lower()), None)
+        if not name:
+            raise Failed("unknown Store product %s" % install)
+        if game.exists() and any(game.iterdir()):
+            raise Failed("%s is not empty, and holds no game to update" % game)
+        have = None
+    else:
+        name, have = read_identity(game)
+        if name not in EDITIONS:
+            raise Failed("unknown package %s in %s" % (name, game))
     store_id, title = EDITIONS[name]
     ui.title = title
     ui.icon = icon_of(game)
 
     want = latest(store_id, name, source)
-    if want["version"] <= have:
+    if have is not None and want["version"] <= have:
         log("%s %s is the Store's latest", title, vstr(have))
         # Nothing staged for an update that is no longer needed is any use.
         if not check_only:
             shutil.rmtree(str(stage_of(game)), ignore_errors=True)
         return 0
-    log("%s %s is installed, the Store has %s", title, vstr(have), vstr(want["version"]))
+    if have is None:
+        log("installing %s %s", title, vstr(want["version"]))
+    else:
+        log("%s %s is installed, the Store has %s", title, vstr(have), vstr(want["version"]))
     if check_only:
         return 10
     if game_running(game):
@@ -388,18 +405,28 @@ def update(game, ui, source, check_only):
     if not want.get("sha256"):
         raise Failed("the Store gave no SHA-256 for the package; not installing it unchecked")
 
-    ui.notify("Updating to %s before launch..." % vstr(want["version"]))
-    ui.open_progress("Updating %s to %s..." % (title, vstr(want["version"])))
+    target = vstr(want["version"])
+    # The installer shows the same window as an update at launch: Lutris'
+    # own install window has no progress for a step it only runs.
+    if have is None:
+        ui.open_progress("Installing %s %s..." % (title, target))
+    else:
+        ui.notify("Updating to %s before launch..." % target)
+        ui.open_progress("Updating %s to %s..." % (title, target))
     ui.progress(0, "Asking the Store for the download...")
 
     stage = stage_of(game)
     stage.mkdir(exist_ok=True)
-    target = vstr(want["version"])
-    package = stage / ("%s_%s_%s.msix" % (name, target, ARCH))
+    # A download directory of the caller's outlives the swap, which removes
+    # the stage: lutris/debug.sh keeps the package there between installs.
+    keep = pathlib.Path(download_dir).resolve() if download_dir else stage
+    keep.mkdir(parents=True, exist_ok=True)
+    package = keep / ("%s_%s_%s.msix" % (name, target, ARCH))
     part = package.with_name(package.name + ".part")
-    for stale in stage.glob("*.msix*"):
-        if stale not in (package, part):
-            stale.unlink()
+    if keep == stage:
+        for stale in stage.glob("*.msix*"):
+            if stale not in (package, part):
+                stale.unlink()
 
     # A package verified by an earlier run that stopped before the swap.  Its
     # rename may have reached the disk before its data did, so it is checked
@@ -412,7 +439,12 @@ def update(game, ui, source, check_only):
         # is still there.  The real unpacked size is checked once it is in.
         size = want.get("download_size") or 0
         remaining = max(size - (part.stat().st_size if part.exists() else 0), 0)
-        need_space(stage, remaining + max(du(game), size), "download the update")
+        unpacked = max(du(game) if game.exists() else 0, size)
+        if keep.stat().st_dev == stage.stat().st_dev:
+            need_space(stage, remaining + unpacked, "download the game")
+        else:
+            need_space(keep, remaining, "download the game")
+            need_space(stage, unpacked, "unpack the game")
 
         url = want.get("url")
         if not url:
@@ -426,7 +458,7 @@ def update(game, ui, source, check_only):
             log("resuming the download at %.0f MB", part.stat().st_size / 1e6)
         t = time.monotonic()
         msd.download_package({"FileName": package.name, "Url": url, "Digest": want["sha256"]},
-                             stage, download_progress(ui, "Downloading %s %s" % (title, target)))
+                             keep, download_progress(ui, "Downloading %s %s" % (title, target)))
         log("downloaded and verified in %.0f s", time.monotonic() - t)
 
     new = stage / "new"
@@ -458,9 +490,14 @@ def update(game, ui, source, check_only):
         log("%s started meanwhile; the update is installed at its next launch", title)
         return 1
     swap(game)
-    log("%s updated from %s to %s", title, vstr(have), target)
     ui.close()
-    ui.notify("Updated to %s" % target)
+    if have is None:
+        log("%s %s installed", title, target)
+        ui.icon = icon_of(game)
+        ui.notify("Installed %s" % target)
+    else:
+        log("%s updated from %s to %s", title, vstr(have), target)
+        ui.notify("Updated to %s" % target)
     return 0
 
 
@@ -471,11 +508,19 @@ def main():
     ap.add_argument("--no-gui", action="store_true", help="no progress window or notifications")
     ap.add_argument("--source", choices=("auto", "catalog", "soap"), default="auto",
                     help="where to ask for the version (default: the catalog, then Windows Update)")
+    ap.add_argument("--install", metavar="PRODUCT_ID",
+                    help="install this Store product into DIR, the game directory, when it has no game yet")
+    ap.add_argument("--download-dir", metavar="DIR",
+                    help="keep the package here instead of beside the game, and leave it there")
     args = ap.parse_args()
+    if args.install and args.check:
+        ap.error("--install and --check do not go together")
 
     ui = Ui(not args.no_gui and not args.check, "MyWhoosh")
+    what = "install" if args.install else "update"
     try:
-        game = find_game(args.dir)
+        # DIR is the game directory itself: there is no game yet to find.
+        game = pathlib.Path(args.dir).resolve() if args.install else find_game(args.dir)
         load_downloader()
         stage = stage_of(game)
         with open(str(game.parent / (".%s.update.lock" % game.name)), "w") as lock:
@@ -488,19 +533,23 @@ def main():
                 raise
             if stage.exists():
                 recover(game)
-            return update(game, ui, args.source, args.check)
+            return update(game, ui, args.source, args.check, args.install, args.download_dir)
     except Cancelled:
-        log("update cancelled; the download resumes at the next launch")
+        log("%s cancelled; the download resumes at the next %s", what,
+            "attempt" if args.install else "launch")
         ui.close()
-        ui.notify("Update cancelled -- starting the installed version, which the game may refuse to run",
+        ui.notify("Install cancelled" if args.install else
+                  "Update cancelled -- starting the installed version, which the game may refuse to run",
                   urgency="critical")
         return 1
     except Exception as e:
         # Including OSError, and anything unforeseen: the installed game is
         # whole -- every step above leaves it so -- and it launches.
-        log("update failed: %s: %s", type(e).__name__, e)
+        log("%s failed: %s: %s", what, type(e).__name__, e)
         ui.close()
-        if ui.last_pct >= 0:
+        if args.install:
+            ui.notify("Install failed: %s. See %s" % (e, LOG), urgency="critical")
+        elif ui.last_pct >= 0:
             ui.notify("Update failed -- starting the installed version. See %s" % LOG, urgency="critical")
         return 1
     finally:

@@ -71,10 +71,17 @@ when there is a desktop to say it to) and gets out of the way.
 ## Updating the game
 
 MyWhoosh refuses to start once the Store has a newer build, and a Lutris install
-has no Store behind it: the installer downloads the package once. So `start`
-runs `mywhoosh-update.py` before anything else. It reads the edition from the
-installed `AppxManifest.xml` — `<Identity Name=… Version=…>` — so no game
-release ever needs a change here.
+has no Store behind it. So `start` runs `mywhoosh-update.py` before anything
+else. It reads the edition from the installed `AppxManifest.xml` —
+`<Identity Name=… Version=…>` — so no game release ever needs a change here.
+
+The first download goes through it as well: the installers unpack the release
+archive first, then run `mywhoosh-update.py --install <product id> --download-dir
+$CACHE drive_c/MyWhoosh`. That is the same lookup, digest check, exe rename and
+swap as an update, into a game directory that is still empty, and the same
+progress window: Lutris' install window only says a step is running. Unlike an
+update, a failed or cancelled install exits non-zero, so Lutris stops the
+install instead of finishing one with no game.
 
 **Where the Store's version comes from.** Measured from here:
 
@@ -124,7 +131,10 @@ also skipped while that game's binary is running.
 For a container or a script, `mywhoosh-update.py DIR` works on its own — `DIR`
 being the prefix, its `drive_c` or the game directory. `--check` only reports
 (exit 10 when an update is available), `--no-gui` drops the window and the
-notifications, and `--source catalog|soap` forces one source.
+notifications, and `--source catalog|soap` forces one source. `--install ID
+GAMEDIR` installs into an empty or missing game directory (and updates one that
+is already there), and `--download-dir` keeps the package outside the stage,
+where the swap leaves it — `debug.sh` keeps its MSIX cache that way.
 
 ## Flatpak Lutris
 
@@ -202,7 +212,9 @@ lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywh
 So a change under `../bleshim/src/`, `../exportshim/`, `blehelper.py`,
 `mywhoosh-ble.sh` or `mywhoosh-update.py` reaches nobody until a release is cut.
 That includes the updater itself: an install from before it has no update path
-except a reinstall.
+except a reinstall. And since the installers download the game with the updater
+from the archive they pin, a `.yml` pinning a release older than `--install`
+installs no game: test with `debug.sh`, which installs this checkout's archive.
 
 ```sh
 ../dist.sh                 # build and pack into ../build/, to test by hand
