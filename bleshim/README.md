@@ -229,4 +229,7 @@ about details that only bite inside the prefix. `ENGINEERING.md` explains which.
 
 `ENGINEERING.md` in this directory is the engineering reference: what the game's own
 IL requires, the traps in wine-mono that cost the most time, why the design is
-shaped this way, and what is still open.
+shaped this way, and what is still open.  `../INVESTIGATION-BLE.md` is the
+write-up of how this shape was reached: the freeze chain with the IL each step
+came from, the fixes with their measurements, and the field incidents closed
+along the way.

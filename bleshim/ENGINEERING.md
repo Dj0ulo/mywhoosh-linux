@@ -158,13 +158,11 @@ rather than an exception, so it is worth remembering when one appears.
 
 ## The helper protocol
 
-Newline-delimited JSON on `127.0.0.1:27019`, one client at a time.
-
-- Requests carry `id` and `op`: `radios`, `scan`, `connect`, `disconnect`,
-  `services`, `chars`, `read`, `write`, `notify`. Replies carry the same `id`.
-- Unsolicited events carry `event`: `advert`, `value`, `connection`.
-- The shim connects lazily and retries every 5 s, so starting the helper after
-  the game still works.
+Newline-delimited JSON on `127.0.0.1:27019`, one client at a time. Requests
+carry `id` and `op`: `radios`, `scan`, `connect`, `disconnect`, `services`,
+`chars`, `read`, `write`, `notify`. Replies carry the same `id`; unsolicited
+events carry `event`: `advert`, `value`, `connection`. The shim connects lazily
+and retries every 5 s, so starting the helper after the game still works.
 
 Deliberately dumb and transport-agnostic: the helper can later move in-process,
 or be replaced by Wine's own API, without `src/Windows.cs` noticing.

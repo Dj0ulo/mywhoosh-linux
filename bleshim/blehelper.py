@@ -85,6 +85,7 @@ import time
 
 import dbus
 import dbus.mainloop.glib
+import dbus.service
 from gi.repository import GLib
 
 BLUEZ = "org.bluez"
@@ -103,6 +104,7 @@ ADVERT_TIMEOUT = 20           # seconds waiting for a named device to be on the 
 # into the radio every five seconds is what kept waking everything up.
 CONNECT_BACKOFF_BASE = 10     # seconds after the first failure
 CONNECT_BACKOFF_MAX = 120     # seconds between attempts at the ladder's top
+GATT_REBUILD_GAP = 90         # seconds between record lifts for one address
 
 verbose = False
 
@@ -162,7 +164,28 @@ class Bluez:
         return self.om.GetManagedObjects()
 
     def device_path(self, addr):
-        return "%s/dev_%s" % (self.adapter_path, addr.upper().replace(":", "_"))
+        """Path of the device whose address is `addr`, by any name it carries.
+
+        Addresses in the protocol are what a client was shown: usually the
+        BlueZ object-path name (`dev_61_C4...`), but after a bond BlueZ
+        re-keys the record to the peripheral's identity address -- an
+        iPhone's `Address` reads E8:5F... while the object keeps the RPA
+        path it was discovered under.  The naming rule is tried first (the
+        common case costs nothing extra); only when it misses do we crawl
+        the tree for the property match, so a remembered identity address
+        keeps connecting across key rotations.
+        """
+        direct = "%s/dev_%s" % (self.adapter_path, addr.upper().replace(":", "_"))
+        if direct in self.objects():
+            return direct
+        want = addr.upper()
+        for path, ifaces in sorted(self.objects().items()):
+            if not path.startswith(self.adapter_path + "/dev_"):
+                continue
+            d = ifaces.get(DEVICE_IFACE)
+            if d and str(d.get("Address", "")).upper() == want:
+                return path
+        return direct
 
     def device_props(self, addr):
         return self.objects().get(self.device_path(addr), {}).get(DEVICE_IFACE, {})
@@ -315,13 +338,20 @@ class Bluez:
         # The GATT tree takes a moment once the link is up; BlueZ flips
         # ServicesResolved when it is complete.  Polling on this thread's own
         # connection is cheap and free of any main-loop dependency.
+        # iOS's bond records can leave ServicesResolved stuck false while the
+        # tree is fully present (a link that lived through our own helper
+        # restarts, say) -- the tree being there is the truth worth trusting.
         end = time.monotonic() + CONNECT_TIMEOUT
+        prefix = path + "/"
         while True:
             try:
                 if props.Get(DEVICE_IFACE, "ServicesResolved"):
                     break
             except dbus.DBusException:
                 raise BleError("%s went away while resolving its services" % addr)
+            if any(p.startswith(prefix) and SERVICE_IFACE in ifaces
+                   for p, ifaces in self.objects().items()):
+                break
             if time.monotonic() >= end:
                 raise BleError("connected to %s but its services never resolved" % addr)
             time.sleep(0.3)
@@ -340,73 +370,196 @@ class Bluez:
         except dbus.DBusException as e:
             trace("Disconnect(%s): %s", addr, e.get_dbus_name())
 
+    def lift_record(self, addr):
+        """Drop the BlueZ device record entirely, the documented way to force
+        a GATT re-discovery on the next connect.
+
+        There is no refresh API on Device1, and BlueZ trusts whatever cache
+        it holds: a record whose discovery once came back empty (a phone
+        bridge whose app had closed, say) stays "resolved with nothing" and
+        every later walk sees an empty tree forever.  Removing the record and
+        connecting anew runs discovery from zero and writes a real cache --
+        and it re-pairs on the way, which the pairing agent handles while the
+        phone asks its owner to confirm once.  Real protocol, the only one
+        that is honest about this trap.
+        """
+        self.adapter().RemoveDevice(dbus.ObjectPath(self.device_path(addr)))
+        log("%s: record removed -- the next connect re-pairs and rediscovers", addr)
+
     # ----------------------------------------------------------------- gatt
 
+    # Some devices carry two services with the same UUID.  The Apple watch
+    # does it deliberately: its private heart-rate service reads and notifies
+    # over an encrypted link (a no-bond client gets InsufficientEncryption),
+    # while the broadcast instance it raises during a workout carries a
+    # notify-only 2a37 whose values are free -- that is the channel aimed at
+    # third-party receivers like this game.  The protocol carries no service
+    # path, only UUIDs, so with duplicates in the tree every op used to
+    # merge both instances' characteristics into one list (two 2a37s and two
+    # 2a38s under one roof, plenty to break the game's enumeration) and act
+    # on whichever object sorted first.  Now one instance representative per
+    # duplicated UUID is chosen -- the one most likely to work without a
+    # bond -- and every listing, read, write and subscribe acts on that
+    # same view of the device.
+
     def services(self, addr):
+        """One representative per service UUID, in tree order.
+
+        The game walks every service it is shown and keeps its own map keyed
+        by UUID; a peripheral hosting two instances of one service (the
+        watch's two 180d) handed it the same key twice.  Windows, where this
+        code was written, shows a client one object per service, so answer
+        the same: characteristics() picks its representative with the same
+        score, keeping the two views coherent.
+        """
         prefix = self.device_path(addr) + "/"
-        out = []
+        best = {}
+        for path, ifaces in sorted(self.objects().items(), reverse=True):
+            svc = ifaces.get(SERVICE_IFACE)
+            if svc and path.startswith(prefix):
+                uuid = str(svc["UUID"]).lower()
+                score = self.instance_score(path)
+                if uuid not in best or score > best[uuid]:
+                    best[uuid] = score
+        out, shown = [], set()
         for path, ifaces in sorted(self.objects().items()):
             svc = ifaces.get(SERVICE_IFACE)
             if svc and path.startswith(prefix):
-                out.append({"uuid": str(svc["UUID"]).lower()})
+                uuid = str(svc["UUID"]).lower()
+                if uuid not in shown:
+                    shown.add(uuid)
+                    out.append({"uuid": uuid})
         return out
 
-    def characteristics(self, addr, service_uuid):
-        objs = self.objects()
+    def service_paths(self, addr, service_uuid):
         prefix = self.device_path(addr) + "/"
-        wanted = {path for path, ifaces in objs.items()
-                  if path.startswith(prefix)
-                  and SERVICE_IFACE in ifaces
-                  and str(ifaces[SERVICE_IFACE]["UUID"]).lower() == service_uuid.lower()}
+        return sorted(path for path, ifaces in self.objects().items()
+                      if path.startswith(prefix)
+                      and SERVICE_IFACE in ifaces
+                      and str(ifaces[SERVICE_IFACE]["UUID"]).lower() == service_uuid.lower())
+
+    def _instance_chars(self, service_path):
+        return [ch for ch in (ifaces.get(CHAR_IFACE)
+                              for path, ifaces in sorted(self.objects().items())
+                              if str(ifaces.get(CHAR_IFACE, {}).get("Service", ""))
+                              == service_path)
+                if ch]
+
+    def instance_score(self, service_path):
+        """Rank a service instance among same-UUID siblings.
+
+        An instance able to notify through a property that is not a read
+        (Apple's broadcast pattern: a notify-only 2a37) outranks one that
+        cannot; any notifier beats none; equal scores keep the tree order.
+        """
+        best = 1
+        for ch in self._instance_chars(service_path):
+            flags = {str(f) for f in ch.get("Flags", [])}
+            if flags & {"notify", "indicate"}:
+                best = max(best, 2 if flags & {"read"} else 3)
+        return best
+
+    def characteristics(self, addr, service_uuid):
+        paths = self.service_paths(addr, service_uuid)
+        if not paths:
+            return []
+        chosen = paths[0]
+        if len(paths) > 1:
+            # Ties take the newest path: a peripheral raises its broadcast
+            # instance after its private one, so last seen is the live one.
+            chosen = max(sorted(paths, reverse=True), key=self.instance_score)
         out = []
-        for path, ifaces in sorted(objs.items()):
+        for path, ifaces in sorted(self.objects().items()):
             ch = ifaces.get(CHAR_IFACE)
-            if not ch or str(ch["Service"]) not in wanted:
+            if not ch or str(ch["Service"]) != chosen:
                 continue
             out.append({"uuid": str(ch["UUID"]).lower(),
                         "flags": [str(f) for f in ch.get("Flags", [])]})
         return out
 
-    def char_path(self, addr, char_uuid):
-        prefix = self.device_path(addr) + "/"
-        for path, ifaces in sorted(self.objects().items()):
-            ch = ifaces.get(CHAR_IFACE)
-            if ch and path.startswith(prefix) and str(ch["UUID"]).lower() == char_uuid.lower():
-                return path
-        raise BleError("%s has no characteristic %s" % (addr, char_uuid))
+    # Flags an ask can require.  The shim sends only an address and a UUID,
+    # so for a duplicated UUID the best instance for each intention is
+    # resolved here; for single instances this is a no-op pass-through.
+    WANT_FLAGS = {
+        "notify": ("notify", "indicate"),
+        "read": ("read",),
+        "write": ("write", "write-without-response", "reliable-write"),
+    }
 
-    def char(self, addr, char_uuid):
-        return dbus.Interface(self.bus.get_object(BLUEZ, self.char_path(addr, char_uuid)), CHAR_IFACE)
+    def char_candidates(self, addr, char_uuid, want=None):
+        """Char paths sharing a UUID, the best for the ask first.
+
+        Ranking rides the service instance's score, so the instance the
+        characteristics list presents is also the one the read, the write
+        and the subscribe land on; among those, candidates actually
+        carrying the ask's flags go before candidates that do not.
+        """
+        prefix = self.device_path(addr) + "/"
+        found = []
+        for path, ifaces in sorted(self.objects().items(), reverse=True):
+            ch = ifaces.get(CHAR_IFACE)
+            if not ch or not path.startswith(prefix):
+                continue
+            if str(ch["UUID"]).lower() != char_uuid.lower():
+                continue
+            flags = {str(f) for f in ch.get("Flags", [])}
+            wanted = self.WANT_FLAGS.get(want, ())
+            fits = not wanted or bool(flags & set(wanted))
+            found.append((0 if fits else 1, -self.instance_score(str(ch["Service"])), path))
+        if not found:
+            raise BleError("%s has no characteristic %s" % (addr, char_uuid))
+        found.sort(key=lambda t: t[:2])
+        return [path for _, _, path in found]
+
+    def char_path(self, addr, char_uuid, want=None):
+        return self.char_candidates(addr, char_uuid, want)[0]
 
     def read(self, addr, char_uuid):
+        path = self.char_path(addr, char_uuid, "read")
         try:
-            value = self.char(addr, char_uuid).ReadValue({})
+            value = dbus.Interface(self.bus.get_object(BLUEZ, path), CHAR_IFACE).ReadValue({})
         except dbus.DBusException as e:
             raise BleError("ReadValue failed: %s" % e.get_dbus_message())
         return bytes(bytearray(value))
 
     def write(self, addr, char_uuid, value, with_response):
         options = {"type": "request" if with_response else "command"}
+        path = self.char_path(addr, char_uuid, "write")
         try:
-            self.char(addr, char_uuid).WriteValue(dbus.Array(value, signature="y"), options)
+            dbus.Interface(self.bus.get_object(BLUEZ, path), CHAR_IFACE).WriteValue(
+                dbus.Array(value, signature="y"), options)
         except dbus.DBusException as e:
             raise BleError("WriteValue failed: %s" % e.get_dbus_message())
 
     def notify(self, addr, char_uuid, enable):
-        char = self.char(addr, char_uuid)
-        try:
-            if enable:
-                char.StartNotify()
-            else:
-                char.StopNotify()
-        except dbus.DBusException as e:
-            # Subscribing twice is the game re-pairing a sensor it already has,
-            # which is not a failure worth reporting up.
-            if e.get_dbus_name() == "org.bluez.Error.InProgress" and enable:
-                trace("%s %s already notifying", addr, char_uuid)
-                return
-            raise BleError("%s failed: %s" % ("StartNotify" if enable else "StopNotify",
-                                              e.get_dbus_message()))
+        """Subscribing is where duplicates bite: an encrypted instance
+        refuses a no-bond ask with InsufficientEncryption while the sibling
+        instance -- the broadcast one, on a watch running a workout -- would
+        have taken the same ask.  Walk the candidates in rank order; the
+        first that subscribes is returned so the event mapping records the
+        object that actually carries the values."""
+        method = "StartNotify" if enable else "StopNotify"
+        cands = self.char_candidates(addr, char_uuid, "notify" if enable else None)
+        failure = None
+        for path in cands:
+            intf = dbus.Interface(self.bus.get_object(BLUEZ, path), CHAR_IFACE)
+            try:
+                getattr(intf, method)()
+                return path
+            except dbus.DBusException as e:
+                # Subscribing twice is the game re-arming a sensor it already
+                # has, which is not a failure worth reporting up.
+                if e.get_dbus_name() == "org.bluez.Error.InProgress" and enable:
+                    trace("%s %s already notifying", addr, char_uuid)
+                    return path
+                failure = e
+                if e.get_dbus_name() in ("org.bluez.Error.InsufficientEncryption",
+                                         "org.bluez.Error.InsufficientAuthorization",
+                                         "org.bluez.Error.InsufficientAuthentication",
+                                         "org.bluez.Error.AuthenticationRejected"):
+                    continue
+                break
+        raise BleError("%s failed: %s" % (method, failure.get_dbus_message()))
 
 
 class BleError(Exception):
@@ -492,6 +645,12 @@ class Server:
         self.work = queue.Queue()
         self.quiescence = Quiescence()
 
+        # One GATT rebuild per address per gap at most: the heal removes a
+        # record and re-pairs, and doing that twice in a row for one tap
+        # would lift a record that is already healthy.
+        self.gatt_heal = {}
+        self.gatt_heal_lock = threading.Lock()
+
     # ------------------------------------------------------------ transport
 
     def listen(self):
@@ -533,31 +692,43 @@ class Server:
     def drop_client(self):
         """Let go of everything the client had asked for.
 
-        The game going away must not leave a trainer subscribed and a scan
-        running: the next process to use the adapter would inherit both.  Jobs
-        still queued are discarded; the job already running on the worker
-        finishes, and its reply finding no client is send()'s no-op.
+        The game going away must not let a scan run on: the next process to
+        use the adapter would inherit it.  Jobs still queued are discarded;
+        the job already running on the worker finishes, and its reply finding
+        no client is send()'s no-op.
+
+        Notifications, though, are kept: a common way to reach this path is
+        the helper itself being replaced (`deploy.sh` plus a restart), with
+        the same shim reconnecting moments later.  Stopping every CCCD then
+        would freeze the trainer fields for a game that believes itself
+        subscribed and never re-asks.  restore_notifications() rebuilds this
+        process's gates from BlueZ's own Notifying flags on the next start,
+        so the state stays truthful across successors; whoever wants things
+        quiet stops them explicitly (the helper exit path keeps them on for
+        the future instance to pick up, as on exit the choices are all
+        "a new helper" or "a new boot" -- on a new boot BlueZ starts clean).
         """
         if self.client is not None:
             try:
                 self.client.close()
             except OSError:
                 pass
-            self.client = None
+        self.client = None
         self.outbox.clear()
         try:
             while True:
                 self.work.get_nowait()
         except queue.Empty:
             pass
-        for addr, uuid in list(self.lookup_meta("subscribed")):
-            try:
-                self.main_bluez.notify(addr, uuid, False)
-            except (BleError, dbus.DBusException):
-                pass
+        # The gates (subscribed/char_addr) stay put: the usual way this runs
+        # is the helper being swapped, with the same shim reconnecting a few
+        # seconds later -- a game mid-ride never re-asks for a CCCD it
+        # believes is active, so its values must not be gated off.  The next
+        # helper START re-derives these maps from BlueZ's Notifying flags
+        # (restore_notifications), which keeps them from drifting stale; the
+        # only case left unpicked-up is "game gone forever", where the
+        # notifications idle harmlessly against a socket nobody reads.
         with self.meta_lock:
-            self.subscribed.clear()
-            self.char_addr.clear()
             self.silent.clear()
         self.stop_scan()
 
@@ -584,7 +755,14 @@ class Server:
                 if line:
                     lines.append(line)
         for line in lines:
-            self.handle(line)
+            try:
+                self.handle(line)
+            except Exception as e:                   # noqa: BLE001 -- the reader
+                # must outlive anything one request can do: a request that
+                # has already been read will be timed out by the shim, but a
+                # reader that dies leaves every later request unanswered
+                # while the game waits silently.
+                log("unhandled on %r: %s: %s", line[:80], type(e).__name__, e)
         return True
 
     def send(self, obj):
@@ -708,6 +886,15 @@ class Server:
                 log("scan: %s", e.get_dbus_message())
                 self.send({"id": rid, "ok": False, "error": e.get_dbus_message()})
                 return
+            # The main loop owes the shim a reply for every request it reads;
+            # an unexpected exception here must be refused, not absorbed --
+            # a swallowed exception answers nothing, and a game in waiting
+            # sits out its whole timeout (this exact shape is how the
+            # 2026-10-29 freeze opened, via a mis-merged Bluez field).
+            except Exception as e:                   # noqa: BLE001
+                log("scan: unexpected: %s: %s", type(e).__name__, e)
+                self.send({"id": rid, "ok": False, "error": "%s: %s" % (type(e).__name__, e)})
+                return
             self.send({"id": rid, "ok": True})
             return
 
@@ -728,8 +915,9 @@ class Server:
 
         # Potentially slow: services, characters, reads, writes, and above all
         # the connect family.  Serialized, in order, on the worker.
+        desc = {k: v for k, v in req.items() if k != "id"}
+        trace("%s queued (id %s) %s", op, rid, json.dumps(desc, sort_keys=True))
         self.work.put((req, rid))
-        trace("%s queued (id %s)", op, rid)
 
     # -------------------------------------------------------------- worker
 
@@ -780,7 +968,83 @@ class Server:
                 continue
             reply = dict(reply or {})
             reply.update({"id": rid, "ok": True})
+            reply_blob = json.dumps({k: v for k, v in reply.items() if k != "id"},
+                                    sort_keys=True, default=str)
+            trace("-> id %s op %s: %s", rid, op, reply_blob[:400])
             self.post(reply)
+
+    def maybe_rebuild_gatt(self, bz, addr):
+        """Empty GATT on a paired device: lift the record, pair again, and
+        give the tree a second life.
+
+        Runs on the worker thread after a `services` came back empty for a
+        device BlueZ still calls paired: BlueZ is then trusting a resolved-
+        but-empty cache and will never discover again on its own (the trap
+        the phone-bridge walked into days after its first pairing - the app
+        had closed when the record was minted, the cache minted empty, and
+        every later walk read `[]`).  The lift makes the next connect run a
+        real discovery and hand out a fresh cache; the pairing agent carries
+        the SMP half, and the phone asks its owner to confirm once.
+
+        This never delays the walk that found the emptiness: the job had
+        already answered its caller honestly before reaching here, and the
+        NEXT walk of this address sees the rebuilt tree.  One rebuild per
+        address per GATT_REBUILD_GAP keeps a sleeping phone from losing its
+        bond in a tap-loop; a rebuild that stopped at "not on the air" leaves
+        the record lifted and then watches for its bridge, so the re-pairing
+        runs the moment the phone app wakes -- no cache command by hand, no
+        extra tap in the game, only the prompt to accept.
+        """
+        with self.gatt_heal_lock:
+            now = time.monotonic()
+            if now - self.gatt_heal.get(addr, 0.0) < GATT_REBUILD_GAP:
+                trace("%s: a GATT rebuild is still resting within the gap", addr)
+                return
+        if not bz.device_props(addr).get("Paired"):
+            return
+        with self.gatt_heal_lock:
+            self.gatt_heal[addr] = time.monotonic()
+        log("%s: paired but its GATT tree reads empty -- lifting the record "
+            "to force a rediscovery", addr)
+        try:
+            bz.lift_record(addr)
+        except dbus.DBusException as e:
+            log("%s: record lift refused (%s); keeping what BlueZ has", addr,
+                e.get_dbus_message())
+            return
+        try:
+            name = bz.connect(addr)
+            count = len(bz.services(addr))
+            if count:
+                log("%s: re-paired as %r, %d service(s) discovered -- "
+                    "a next walk of this sensor serves the tree", addr, name, count)
+            else:
+                log("%s: re-paired as %r but the tree came up empty again -- "
+                    "the bridge side is not serving yet", addr, name)
+        except (BleError, dbus.DBusException) as e:
+            log("%s: no rebuild yet (%s); the record stays lifted and this "
+                "watch pairs on sight of its bridge", addr, e)
+            # The usual miss: the bridge is asleep (the phone app closed, iOS
+            # suspended it).  The record is already lifted, so nothing about
+            # the cache stays rotten -- the only thing left to do is pair,
+            # and the pairing prompt is the phone's to answer.  Watch for the
+            # bridge's return and carry the whole second half then, so that
+            # opening the phone app is the user's whole part: they accept the
+            # prompt, the tree rebuilds, the next walk serves it.  Bounded by
+            # the same gap that rate-limits repeats, so a bridge that never
+            # comes cannot hold the worker longer than its own window, and a
+            # later walk of this sensor re-pairs the same way.
+            if not bz.on_air(addr) and bz.wait_for_advert(addr, GATT_REBUILD_GAP,
+                                                          getattr(bz, "host", None)):
+                try:
+                    name = bz.connect(addr)
+                    count = len(bz.services(addr))
+                    log("%s: the bridge returned -- re-paired as %r, %d "
+                        "service(s) discovered; the next walk serves the tree",
+                        addr, name, count)
+                except (BleError, dbus.DBusException) as e2:
+                    log("%s: re-pair on its return refused (%s); a later walk "
+                        "of this sensor re-pairs", addr, e2)
 
     def worker_dispatch(self, op, req):
         """One job against BlueZ.  Runs on the worker thread, may block."""
@@ -804,7 +1068,14 @@ class Server:
             return {}
 
         if op == "services":
-            return {"services": bz.services(addr)}
+            out = bz.services(addr)
+            if not out:
+                # An empty tree on a paired device is BlueZ trusting a
+                # resolved-but-empty cache; the lift (worker-side) makes the
+                # NEXT walk of this sensor discover for real.  This reply
+                # still leaves right now.
+                self.maybe_rebuild_gatt(bz, addr)
+            return {"services": out}
 
         if op == "chars":
             chars = bz.characteristics(addr, (req.get("service") or "").lower())
@@ -826,9 +1097,9 @@ class Server:
 
         if op == "notify":
             enable = bool(req.get("enable"))
-            bz.notify(addr, char, enable)
+            used = bz.notify(addr, char, enable)
             with self.meta_lock:
-                self.char_addr[bz.char_path(addr, char)] = (addr, char)
+                self.char_addr[used] = (addr, char)
                 if enable:
                     self.subscribed.add((addr, char))
                 else:
@@ -880,6 +1151,97 @@ class Server:
                 if d and path.startswith(prefix):
                     self.path_addr[path] = str(d.get("Address", "")).upper()
 
+    def restore_notifications(self):
+        """Rebuild char_addr/subscribed from BlueZ's Notifying flags.
+
+        A helper restart is invisible to the game -- the shim holds its own
+        connection state and never re-asks for a CCCD it believes is active.
+        But the CCCD lives on, on BlueZ's side: a trainer that was streaming
+        keeps streaming into this process, whose gate (`subscribed`) was
+        wiped, so every packet was being dropped before reaching the game.
+        Walking the tree for characteristics BlueZ reports as Notifying puts
+        that state back and the values resume without a device round-trip.
+        """
+        try:
+            objs = self.main_bluez.objects()
+        except dbus.DBusException as e:
+            log("notify restore: %s", e.get_dbus_message())
+            return
+        device_prefixes = sorted(
+            (path for path in objs if "/dev_" in path and DEVICE_IFACE in objs[path]),
+            key=len, reverse=True)
+        restored = []
+        with self.meta_lock:
+            for path, ifaces in objs.items():
+                c = ifaces.get(CHAR_IFACE)
+                if not c or not c.get("Notifying"):
+                    continue
+                owner = next((dev for dev in device_prefixes
+                              if path.startswith(dev + "/")), None)
+                if owner is None:
+                    continue
+                addr = objs[owner][DEVICE_IFACE].get("Address")
+                if not addr:
+                    continue
+                addr = str(addr).upper()
+                uuid = str(c["UUID"]).lower()
+                self.char_addr[path] = (addr, uuid)
+                self.path_addr[owner] = addr
+                self.subscribed.add((addr, uuid))
+                restored.append("%s/%s" % (addr, uuid[:8]))
+        if restored:
+            log("notify state restored for %d characteristic(s): %s",
+                len(restored), ", ".join(restored))
+
+    def notif_state_loop(self):
+        """Periodically re-arm subscriptions BlueZ let fall over.
+
+        Protocol-wise a subscription has three keepers: the game's belief,
+        the helper's gate and the CCCD on BlueZ's side.  Helper hand-offs,
+        suspend races or a bluetoothd hiccup can tear one while the others
+        stand; a game that believes itself subscribed never re-asks, so the
+        movement must come from here: a Notifying seen false while the link
+        is up gets the same StartNotify the game's subscribe would have
+        issued.  Nothing is triggered while everything agrees -- the pass
+        only ever logs when it actually re-arms something.
+        """
+        time.sleep(12)              # let whatever connects connect first
+        while True:
+            try:
+                self.heal_notifications()
+            except Exception as e:  # noqa: BLE001 -- the watcher survives all
+                log("self-heal pass failed: %r", e)
+            time.sleep(10)
+
+    def heal_notifications(self):
+        with self.meta_lock:
+            pairs = list(self.subscribed)
+        if not pairs:
+            return
+        objs = self.main_bluez.objects()
+        for addr, uuid in pairs:
+            try:
+                path = self.main_bluez.char_path(addr, uuid)
+            except (BleError, IndexError):
+                continue
+            ch = objs.get(path, {}).get(CHAR_IFACE)
+            if not ch:
+                continue
+            with self.meta_lock:
+                if path not in self.char_addr:
+                    self.char_addr[path] = (addr, uuid)
+            device_path = self.main_bluez.device_path(addr)
+            d = objs.get(device_path, {}).get(DEVICE_IFACE)
+            if not d or not d.get("Connected"):
+                continue
+            if ch.get("Notifying"):
+                continue
+            try:
+                self.main_bluez.notify(addr, uuid, True)
+                log("self-heal: re-armed %s %s", addr, uuid)
+            except (BleError, dbus.DBusException) as e:
+                log("self-heal: StartNotify(%s, %s) failed: %s", addr, uuid, e)
+
     def announce_known(self):
         """Report the devices already on the air when a scan starts.
 
@@ -926,7 +1288,16 @@ class Server:
                    "uuids": uuids,
                    "rssi": int(props.get("RSSI", 0))})
 
-    def on_properties_changed(self, iface, changed, invalidated, path=None):
+    def on_properties_changed(self, iface, changed, invalidated=None, path=None):
+        if invalidated is None:
+            # Never seen from BlueZ, whose PropertiesChanged always carries
+            # the third argument -- but a 2026-10-30 session had a two-
+            # argument PropertiesChanged land here and crash the handler:
+            # dbus-python calls it straight, a positional shortfall is a
+            # TypeError in the loop's signal dispatch, and for the char
+            # event that carries the heart rate that would strand every
+            # later subscription.  Name it and carry on.
+            trace("PropertiesChanged on %s %s: no invalidated list", path, iface)
         if iface == CHAR_IFACE and "Value" in changed:
             with self.meta_lock:
                 known = self.char_addr.get(path)
@@ -938,6 +1309,19 @@ class Server:
                     return
             self.post({"ev": "value", "addr": addr, "char": uuid,
                        "value": bytes(bytearray(changed["Value"])).hex()})
+            # Heart-rate notifications are the one stream worth a trace line:
+            # the trainers' fields repeat several times a second and would
+            # flood the log, so only 2a37 is named, with its decoded BPM.
+            if uuid.startswith("00002a37"):
+                val = bytes(bytearray(changed["Value"]))
+                flags = val[0] if val else 0
+                if len(val) >= 3 and flags & 0x01:
+                    bpm = val[1] | (val[2] << 8)
+                elif len(val) >= 2:
+                    bpm = val[1]
+                else:
+                    bpm = 0
+                trace("value %s 00002a37 = %d bpm (flags 0x%02x)", addr, bpm, flags)
             return
 
         if iface == ADAPTER_IFACE:
@@ -1014,6 +1398,8 @@ class Server:
             return
         if DEVICE_IFACE not in ifaces:
             return
+        if DEVICE_IFACE not in ifaces:
+            return
         # BlueZ removes a non-bonded device's object when it stops advertising,
         # which is what a sleeping trainer looks like.  The game hears about it
         # as a disconnection, and reconnecting is its decision, not ours.
@@ -1059,6 +1445,91 @@ def list_devices(bluez):
                                          " ".join(u[4:8] for u in uuids) or "no service UUIDs"))
 
 
+# ------------------------------------------------------------------ agent
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_MANAGER = "org.bluez.AgentManager1"
+AGENT_PATH = "/org/bluez/blehelper/agent"
+
+
+class PairingAgent(dbus.service.Object):
+    """org.bluez.Agent1 answering the SMP exchanges BlueZ cannot sit through.
+
+    The sensors that stream heart rate over an encrypted characteristic make
+    the link demand pairing the moment the game writes the CCCD.  BlueZ then
+    looks for an agent to carry the exchange; with none registered on this
+    desktop the SMP stalls, the peripheral drops the link, and the game's
+    subscribe dies with NotConnected.  This agent carries it instead: passkeys
+    and confirmations are logged verbatim (so the code shown on the phone can
+    be compared) while the machine-side answer is always accept -- a trainer
+    or a watch bridge is not a MITM target worth a full pairing every cycle.
+    """
+
+    def __init__(self, bus):
+        dbus.service.Object.__init__(self, bus, AGENT_PATH)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Release(self):
+        log("agent: released by BlueZ")
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        log("agent: RequestPinCode %s -> 000000", device)
+        return "000000"
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pin):
+        log("agent: DisplayPinCode %s %s", device, pin)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        log("agent: RequestPasskey %s -> replying 0 (no keyboard here)", device)
+        return dbus.UInt32(0)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ouu", out_signature="")
+    def DisplayPasskey(self, device, passkey, entered):
+        log("agent: ★ passkey for %s: %06d", device, passkey)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        # The phone shows the same six digits and waits for its user; our side
+        # confirms on its own so the exchange never waits on the console.
+        log("agent: ★★ pairing asked for %s, code %06d -- accepted", device, passkey)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        log("agent: RequestAuthorization %s -> accepted", device)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        log("agent: AuthorizeService %s %s -> accepted", device, uuid)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Cancel(self):
+        log("agent: exchange cancelled by BlueZ")
+
+
+def register_pairing_agent(bus):
+    """Register with AgentManager1; failure is logged and non-fatal.
+
+    A desktop running another agent keeps its own: both registries can hold
+    agents, BlueZ simply picks one -- ours exists so bluetoothd always finds
+    somebody, which is the whole job.
+    """
+    try:
+        agent = PairingAgent(bus)
+        manager = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"),
+                                 AGENT_MANAGER)
+        manager.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+        manager.RequestDefaultAgent(AGENT_PATH)
+        log("agent: registered at %s (DisplayYesNo, machine side auto-accepts; "
+            "passkeys are logged here)", AGENT_PATH)
+        return agent
+    except dbus.DBusException as e:
+        log("agent: unavailable (%s) -- encrypted characteristics on the phone "
+            "side will keep dropping the link", e.get_dbus_message())
+        return None
+
+
 def main():
     global verbose
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
@@ -1085,6 +1556,8 @@ def main():
         return
     bluez = Bluez(bus, adapter)
 
+    register_pairing_agent(bus)
+
     if args.list:
         list_devices(bluez)
         return
@@ -1102,12 +1575,15 @@ def main():
                             signal_name="InterfacesRemoved")
     server.refresh_radios()
     server.remember_paths()
+    server.restore_notifications()
     server.listen()
     # The worker thread that takes every potentially slow BlueZ operation: it
     # builds its own D-Bus connection when it starts, which is why it is
     # started after the loop thread has its own bus in place.
     threading.Thread(target=server.worker_loop,
                      name="blehelper-worker", daemon=True).start()
+    threading.Thread(target=server.notif_state_loop,
+                     name="blehelper-selfheal", daemon=True).start()
 
     try:
         GLib.MainLoop().run()

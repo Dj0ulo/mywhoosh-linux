@@ -389,7 +389,21 @@ namespace MyWhoosh
             int lastCount = -1;
             DateTime lastLoggedAt;
 
+            // Two alternating CoTaskMem blocks, grown in place, never freed
+            // while the poller lives.  The first version allocated a fresh
+            // block for every poll -- two or three allocations a second of a
+            // couple of structs each, which the allocator barely notices but
+            // which nothing ever frees, because which block a caller still
+            // holds after the call is unknowable.  Alternating gives the
+            // common case (two calls a few milliseconds apart, two different
+            // blocks) its own slot without a free, and growth replaces a slot
+            // in place the rare time the device list outgrows it.
+            readonly IntPtr[] blocks = new IntPtr[2];
+            readonly int[] blockBytes = new int[2];
+            int slot;
+
             internal Poller(string name, MethodInfo method, Type elem)
+
             {
                 this.name = name;
                 this.method = method;
@@ -426,13 +440,20 @@ namespace MyWhoosh
 
                 int count = devices.Count;
 
-                // Mirror the CLR's out-direction: a fresh CoTaskMemAlloc block,
-                // its address stored through the pointer, the count returned.
-                // Never null, so a caller that dereferences before checking the
-                // count reads zeroed memory instead of faulting.  Fresh every
-                // call, never reused: ENGINEERING.md, "Who owns the memory".
-                int bytes = esize * Math.Max(count, 1);
-                IntPtr block = Marshal.AllocCoTaskMem(bytes);
+                // Mirror the CLR's out-direction: a CoTaskMem block of
+                // structs, its address stored through the pointer, the count
+                // returned.  Never null, so a caller that dereferences before
+                // checking the count reads zeroed memory instead of faulting.
+                int wanted = esize * Math.Max(count, 1);
+                slot = slot == 1 ? 0 : 1;
+                if (blocks[slot] == IntPtr.Zero || blockBytes[slot] < wanted)
+                {
+                    if (blocks[slot] != IntPtr.Zero) Marshal.FreeCoTaskMem(blocks[slot]);
+                    blockBytes[slot] = wanted;
+                    blocks[slot] = Marshal.AllocCoTaskMem(wanted);
+                }
+                IntPtr block = blocks[slot];
+                int bytes = blockBytes[slot];
                 for (int i = 0; i < bytes; i++) Marshal.WriteByte(block, i, 0);
                 for (int i = 0; i < count; i++)
                     Marshal.StructureToPtr(devices[i],

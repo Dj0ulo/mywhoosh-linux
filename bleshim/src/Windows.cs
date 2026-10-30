@@ -827,7 +827,16 @@ namespace Windows.Devices.Bluetooth.GenericAttributeProfile
                                              "char", characteristicUuid.ToString("D"),
                                              "enable", enable);
                     if (reply == null)
+                    {
+                        // A refused reply is logged by Backend with the reason;
+                        // an unanswered one (no helper, socket down) would fail
+                        // silently here.  Naming the miss matters: a disappeared
+                        // subscription is indistinguishable from a device the
+                        // game has decided not to use.
+                        Backend.Log("subscribe to " + deviceHandle.Address + "/"
+                                    + characteristicUuid + " unanswered by the helper");
                         return GattCommunicationStatus.Unreachable;
+                    }
 
                     lock (Subscribed)
                     {
