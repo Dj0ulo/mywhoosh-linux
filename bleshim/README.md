@@ -113,20 +113,11 @@ blehelper.py  ──►  BlueZ (D-Bus)  ──►  your Bluetooth adapter
   keeps wine-mono in its own directory has no tree to write to. The stock build
   is fine; nothing here needs a patched runtime.
 
-And one thing the prefix must **not** have:
-
-- **A running `"Bonjour Service"`.** The game only touches Apple Bonjour's COM
-  objects when the SCM reports a service by exactly that name in state
-  `Running`; `OpenBikeManager::OBM_Initialize` and `WahooProgram::.ctor` both
-  test it first and skip their initialisers when it is false. With no such
-  service the Bonjour path is never entered, and nothing here needs a COM server
-  at all. With one, the game demands Apple's COM objects and dies with a
-  `COMException` out of `OBM_Initialize` if they are missing — before Bluetooth
-  is ever reached.
-
-  A fresh prefix has no such service. One that has had Apple's Bonjour or
-  iTunes installed into it does. `./install.sh --verify` says which state a
-  prefix is in; `ENGINEERING.md` has the IL.
+A running `"Bonjour Service"` also requires the
+[Bonjour compatibility adapter](../bonjour/README.md). The Lutris
+recipes install and check both. The standalone Bluetooth installer alone does
+not supply it. Do not disable Bonjour to avoid the original Mono exception:
+the adapter preserves the COM event path. `ENGINEERING.md` has the gate's IL.
 
 ## When it does not work
 
@@ -140,7 +131,7 @@ on the shim.
 | `scanning` but your trainer never appears | It is asleep. Pedal. Confirm with `./blehelper.py --list` |
 | `advertises no service UUIDs; the game will ignore it` | Normal for phones and watches. The game only shows devices advertising a fitness service |
 | The game reports Bluetooth off | The helper is not reachable, or the adapter is off (`bluetoothctl power on`) |
-| Game exits at startup with `COMException` | A `"Bonjour Service"` is running in the prefix, so the game took the Bonjour path. `./install.sh --verify` |
+| Game exits at startup with `COMException` or `ComAwareEventInfo` `NotImplementedException` | Check Bonjour's COM installation and the [per-game compatibility adapter](../bonjour/README.md); keep Bonjour enabled |
 | The device list crashes on first poll | `../exportshim/` is not installed |
 | Lutris is a Flatpak and there is no adapter | The sandbox cannot reach BlueZ; the helper is run on the host instead, and the host needs `dbus-python` and `PyGObject`. `../lutris/README.md` has the detail |
 

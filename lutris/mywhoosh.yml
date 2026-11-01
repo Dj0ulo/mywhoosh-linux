@@ -19,7 +19,8 @@ script:
   variables:
     # The release the Bluetooth stack is fetched from.  `../dist.sh --release`
     # bumps this line; it is the one thing that says which build users get.
-    shim_release: v0.1.4
+    shim_repository: Dj0ulo/mywhoosh-linux
+    shim_release: v0.1.5
   files:
     # The Bluetooth stack, as one versioned archive: two assemblies the game
     # loads instead of WinRT, the export shim it needs to poll its device list,
@@ -28,7 +29,11 @@ script:
     # the helper and the shim inside the prefix speak a protocol between
     # themselves -- fetched separately, they are eventually different builds
     # of it.
-    - shim: https://github.com/Dj0ulo/mywhoosh-linux/releases/download/$shim_release/mywhoosh-bleshim-$shim_release.tar.gz
+    - shim: https://github.com/$shim_repository/releases/download/$shim_release/mywhoosh-bleshim-$shim_release.tar.gz
+    - bonjour:
+        url: https://download.info.apple.com/Mac_OS_X/061-8098.20100603.gthyu/BonjourPSSetup.exe
+        filename: BonjourPSSetup.exe
+        checksum: sha256:7f1ec347cd429cfb25a34b2147e02231334f28290e0c28be213415b0f99da1a0
   game:
     exe: drive_c/MyWhoosh/MyWhoosh.exe
     prefix: $GAMEDIR
@@ -36,6 +41,7 @@ script:
   wine:
     dxvk: true
   system:
+    prefix_command: '"$GAMEDIR/bleshim/mywhoosh-bonjour.sh"'
     # The game's Bluetooth is answered from inside the prefix, but the hardware
     # is reached from outside it: BlueZ is on D-Bus, and Wine's winsock has no
     # AF_UNIX.  So a Linux helper runs alongside the game, and these two lines
@@ -54,6 +60,7 @@ script:
       # no tree there to put them in.  MONO_PATH is searched first whichever
       # mono runs, and it is read as a Windows path -- hence Z:, which is /.
       MONO_PATH: Z:$GAMEDIR/bleshim
+      MONO_GAC_PREFIX: Z:$GAMEDIR/bleshim/bonjour
   installer:
     - task:
         name: create_prefix
@@ -74,6 +81,24 @@ script:
         format: tgz
     - chmodx: $GAMEDIR/bleshim/blehelper.py
     - chmodx: $GAMEDIR/bleshim/mywhoosh-ble.sh
+    - chmodx: $GAMEDIR/bleshim/mywhoosh-bonjour.sh
+    - extract:
+        file: bonjour
+        dst: $CACHE/bonjour
+        format: exe
+    - task:
+        name: wineexec
+        description: Installing Bonjour with COM support
+        executable: msiexec
+        args: '/i "$CACHE/bonjour/Bonjour64.msi" ADDLOCAL=ALL /qf /norestart'
+        prefix: $GAMEDIR
+        arch: win64
+    - task:
+        name: wineexec
+        description: Preparing and checking Bonjour compatibility
+        executable: $GAMEDIR/bleshim/SetupBonjour.exe
+        prefix: $GAMEDIR
+        arch: win64
     # The game comes from the updater that keeps it current at launch, so the
     # first download shows the same progress window, is checked against the
     # Store's SHA-256 the same way, and renames the exe as an update does.

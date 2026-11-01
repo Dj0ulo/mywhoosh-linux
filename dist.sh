@@ -38,11 +38,12 @@ fi
 # Unreleased builds are named after the commit they came from, so an archive
 # lying around in build/ can still be identified a month later.
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-git diff --quiet 2>/dev/null || commit="$commit+dirty"
+[[ -z "$(git status --porcelain 2>/dev/null)" ]] || commit="$commit+dirty"
 version="${tag:-$commit}"
 
 ./bleshim/build.sh
 ./exportshim/build.sh
+bash ./bonjour/build.sh
 
 name="mywhoosh-bleshim-$version"
 stage="build/$name"
@@ -52,11 +53,15 @@ mkdir -p "$stage"
 cp -f bleshim/build/Windows.dll \
       bleshim/build/System.Runtime.WindowsRuntime.dll \
       exportshim/build/MyWhooshShim.dll \
+    bonjour/build/BonjourCompat.dll \
+    bonjour/build/SetupBonjour.exe \
+    bonjour/build/PatchComWrapper.cs \
       bleshim/blehelper.py \
+    lutris/mywhoosh-bonjour.sh \
       lutris/mywhoosh-ble.sh \
       lutris/mywhoosh-update.py \
       "$stage/"
-chmod +x "$stage/blehelper.py" "$stage/mywhoosh-ble.sh" "$stage/mywhoosh-update.py"
+chmod +x "$stage/blehelper.py" "$stage/mywhoosh-ble.sh" "$stage/mywhoosh-update.py" "$stage/mywhoosh-bonjour.sh"
 
 mkdir -p build/cache
 downloader="build/cache/ms_store_download-$DOWNLOADER_COMMIT.py"
@@ -99,19 +104,30 @@ fi
 # The installers are release assets too, so a user installs a tested pair
 # rather than whatever the branch looked like today -- which means the tag has
 # to point at the commit that pins it.  Bump first, commit, then publish.
-sed -i "s|^\( *shim_release: \).*|\1$tag|" lutris/*.yml
-if ! git diff --quiet || ! git diff --cached --quiet; then
+repository="${RELEASE_REPOSITORY:-$(git remote get-url origin)}"
+repository="${repository#https://github.com/}"
+repository="${repository#git@github.com:}"
+repository="${repository%.git}"
+if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Set RELEASE_REPOSITORY to the GitHub owner/repository to publish." >&2
+    exit 1
+fi
+sed -i -e "s|^\( *shim_release: \).*|\1$tag|" \
+       -e "s|^\( *shim_repository: \).*|\1$repository|" lutris/*.yml
+if [[ -n "$(git status --porcelain)" ]]; then
     echo
     echo "lutris/*.yml now pin $tag, and the tree has uncommitted changes."
     echo "gh tags the release at HEAD, so commit first and run this again:"
     echo
-    echo "    git commit -am 'Release $tag' && ./dist.sh --release $tag"
+    echo "    git add <reviewed files> && git commit -m 'Release $tag'"
+    echo "    ./dist.sh --release $tag"
     exit 1
 fi
 
 gh release create "$tag" \
+    --repo "$repository" \
     --title "$tag" \
-    --notes "$(printf 'Install with:\n\n    lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/download/%s/mywhoosh.yml\n\n```\n%s\n```\n' "$tag" "$(cat "$stage/MANIFEST")")" \
+    --notes "$(printf 'Downloads and verifies Bonjour directly from Apple. Complete its installer and licence prompt; no local MSI or Apple account is required.\n\nInstall with:\n\n    lutris -i https://github.com/%s/releases/download/%s/mywhoosh.yml\n\n```\n%s\n```\n' "$repository" "$tag" "$(cat "$stage/MANIFEST")")" \
     "$archive" lutris/mywhoosh.yml lutris/mywhoosh-hd.yml
 
 echo

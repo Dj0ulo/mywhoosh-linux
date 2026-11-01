@@ -14,5 +14,7 @@ Runs MyWhoosh under Wine and answers its own WinRT Bluetooth calls from BlueZ.
   Entry points catch, log, and return something harmless.
 - **Read the IL before deciding:** `tools/ildump.sh` (what the game does),
   `winmd/members.py` (what it references).
-- **No `"Bonjour Service"` may run in the prefix**, or the game takes the Bonjour
-  COM path wine-mono can't handle. See `bleshim/ENGINEERING.md`.
+- **Keep Bonjour working, not hidden.** A running `"Bonjour Service"` requires
+  the per-game compatibility adapter in `bonjour/` for Wine Mono's COM event
+  path. Never disable Bonjour to make a test pass or replace the runner's
+  installed framework. See `bonjour/README.md` for setup and callback tests.

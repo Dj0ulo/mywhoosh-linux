@@ -200,8 +200,10 @@ BlueZ's real timing is only visible with hardware.
 
 ## The Bonjour gate
 
-This stack needs no Bonjour COM server and no patched wine-mono, and the reason
-is one branch in the game's own IL rather than anything the shim does.
+Bluetooth alone can bypass Bonjour through a branch in the game's own IL.
+That was the previous launch workaround. The compatibility adapter keeps Bonjour
+enabled and supplies real COM events through [the adapter](../bonjour/README.md)
+and an isolated framework copy, without replacing the installed Wine Mono.
 
 `OpenBikeManager::GetNetworkState` and `WahooProgram::GetNetworkState` are the
 same method twice: walk `ServiceController.GetServices()`, look for a service
@@ -231,11 +233,11 @@ So with no `"Bonjour Service"` running:
 - `WD_GetDirconServiceAvailability` returns false and the game simply does not
   offer Direct Connect, which here is correct.
 
-A fresh prefix has no such service, so this costs nothing. A prefix that has had
-Apple's Bonjour installed into it — by iTunes, or deliberately — makes the
-Bluetooth path appear to require a COM server and a patched runtime, and that
-appearance is entirely an artefact of the service. `./install.sh --verify`
-reports the gate state; the service is not ours and the script never removes it.
+A fresh prefix has no such service. The Lutris recipes deliberately
+install it with its COM features and prepare the compatibility adapter before
+launch. `./install.sh --verify` reports the gate state but does not install the
+adapter. No script removes or disables Bonjour. A successful test must exercise
+the enabled branch; skipping it does not validate Bonjour support.
 
 ## Open
 

@@ -16,7 +16,7 @@
 # no assembly of that name the game does not start at all.
 #
 # Both install and --verify report the Bonjour gate described below, because a
-# prefix with a Bonjour service in it is the one thing that stops this working.
+# running Bonjour also requires the compatibility adapter in ../bonjour.
 set -e
 cd "$(dirname "$0")"
 
@@ -65,9 +65,9 @@ report_gate() {
     if gate_is_open; then
         echo "  gate     OPEN -- '$SVC' is RUNNING in this prefix"
         echo "           the game will take the Bonjour path and then need Apple's"
-        echo "           COM objects; stop the service if this prefix is meant to"
-        echo "           be Bluetooth-only:"
-        echo "               WINEPREFIX=$WINEPREFIX $WINE net stop \"$SVC\""
+        echo "           COM objects and the per-game Mono adapter in ../bonjour."
+        echo "           Use the Lutris installer or follow ../bonjour/README.md."
+        echo "           Keep Bonjour enabled; this standalone script does not install the adapter."
     else
         echo "  gate     shut -- no '$SVC' running, so the game skips Bonjour entirely"
     fi

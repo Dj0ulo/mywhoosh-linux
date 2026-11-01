@@ -16,6 +16,9 @@ companion app.
 
 - A 64-bit Linux system with [Lutris](https://lutris.net/downloads/) installed
 - `python3`
+- Wine Mono with its bundled compiler and Mono.Cecil 0.11.x (11.3.0 tested)
+- Accept Apple's Bonjour licence when its installer opens. The package is
+   downloaded automatically; no Apple account or existing MSI is needed.
 - Working Bluetooth: if `bluetoothctl scan on` shows your trainer when you
   pedal, you are ready
 
@@ -33,6 +36,10 @@ so you do not have to get it right in advance.
 
 ## Install
 
+Bonjour support requires a release containing the compatibility adapter.
+To test this change before release, use the
+[local-build procedure](bonjour/README.md#local-installer-before-publication).
+
 There is nothing to clone. Pick your edition and run one command:
 
 **MyWhoosh**
@@ -48,11 +55,13 @@ install:
 lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywhoosh-hd.yml
 ```
 
-Lutris then does everything itself:
+Lutris handles the downloads and setup; complete Apple's Bonjour installer
+when it opens:
 
 1. creates a 64-bit Wine prefix,
-2. adds the Bluetooth support to the prefix and puts the Linux-side helper and
-   the game updater next to the game,
+2. downloads and verifies Apple's Bonjour package, extracts and installs Bonjour
+   with COM support, prepares an isolated Mono compatibility copy, and adds
+   Bluetooth support and the game updater,
 3. downloads the MyWhoosh package straight from the Microsoft Store and
    installs it into the prefix, in the same progress window as later updates,
 4. wires the helper to start and stop with the game, and checks your setup.
@@ -117,6 +126,7 @@ they change.
 | [`lutris/`](lutris/README.md) | The Lutris installers, the script that runs the helper beside the game, and the game updater |
 | [`bleshim/`](bleshim/README.md) | The Bluetooth support: the library the game loads, plus the Linux helper that speaks to BlueZ |
 | [`exportshim/`](exportshim/README.md) | Four game entry points Wine's .NET runtime cannot handle, replaced in memory |
+| [`bonjour/`](bonjour/README.md) | Real Bonjour COM events through a per-game Mono compatibility copy |
 | [`winmd/`](winmd/README.md) | The same library with Bluetooth switched off — what the game needs just to start |
 | [`tools/`](tools/README.md) | Small programs that read the game's own code, so decisions here are based on it |
 | [`patch/`](patch/README.md) | An older, launch-only approach, kept for reference |

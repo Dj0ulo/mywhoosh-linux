@@ -7,12 +7,32 @@ Two installer scripts and the small script that runs beside the game.
 | `mywhoosh.yml` | Installs MyWhoosh from the Microsoft Store into a Wine prefix, with Bluetooth |
 | `mywhoosh-hd.yml` | The same for MyWhoosh HD — a different store id and directory, and its own vkd3d-proton: HD renders with D3D12, which Lutris' vkd3d v2.14 crashes at startup |
 | `mywhoosh-ble.sh` | Runs on the Linux side: checks the setup at install time, updates the game and starts the helper before it, stops the helper after |
+| `mywhoosh-bonjour.sh` | Command-prefix guard: validates the selected runtime's isolated framework copy and Bonjour, then executes Lutris's game command |
 | `mywhoosh-update.py` | Brings an installed game up to the Microsoft Store's version; standalone, so anything that launches the game can run it |
 | `debug.sh` | Builds, removes the previous debug install, and runs `mywhoosh.yml` (`--hd`: `mywhoosh-hd.yml`) rewritten to install this checkout's build and the MSIX cached in `../downloads/`: a fresh install to try before a release |
 
 ```sh
 lutris -i lutris/mywhoosh.yml
 ```
+
+The release pinned in the recipes must be published before they can download
+its archive. To test unreleased changes, use the
+[local installer procedure](../bonjour/README.md#local-installer-before-publication).
+Both installers download Apple's official Bonjour Print Services package,
+verify a pinned SHA-256, and extract `Bonjour64.msi` using Lutris's 7-Zip
+extractor. Complete Apple's Bonjour installer, including its licence prompt;
+all Bonjour features are requested, including COM support. No Apple account,
+manual extraction, printer wizard or Apple Software Update is needed. See
+[download failures and offline use](../bonjour/README.md#download-failures-and-offline-use)
+for local-file fallbacks. They generate a per-game framework copy using Wine
+Mono's bundled compiler and Cecil; no runner or game framework file is overwritten.
+
+The recipe adds `MONO_GAC_PREFIX: Z:$GAMEDIR/bleshim/bonjour` and a
+`prefix_command` pointing at `mywhoosh-bonjour.sh`. The latter validates runtime
+changes, service availability and COM subscriptions on every launch. Unlike
+the Bluetooth helper's nonfatal checks, a Bonjour compatibility failure blocks
+the game command. This guard is necessary because Lutris 0.5.14 does not act
+on a prelaunch script's nonzero exit status.
 
 ## Why no game file is patched
 

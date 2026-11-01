@@ -10,6 +10,7 @@ runs it under Wine and, harder, connects real fitness sensors to it — the game
 |---|---|
 | `bleshim/` | The Bluetooth stack: a .NET assembly the game loads instead of WinRT, plus a Linux helper speaking BlueZ |
 | `exportshim/` | Replaces game entry points wine-mono marshals wrongly, in memory |
+| `bonjour/` | Real COM event subscriptions and runtime-local framework generation, with callback tests |
 | `winmd/` | The declaration-only stubs the game needs to start at all — and the "Bluetooth off" state to fall back to |
 | `tools/` | Small programs that read the game's own bytecode; every decision here comes from them |
 | `lutris/` | The Lutris installers, the script that runs the helper beside the game, and the game updater |
@@ -42,11 +43,13 @@ an error. Entry points catch, log, and return something harmless.
 `winmd/members.py` answers what it references. Both have overturned reasonable
 assumptions here.
 
-**The game must not find a Bonjour service in the prefix.** It reaches Apple
-Bonjour's COM objects — and the `ComAwareEventInfo` that wine-mono does not
-implement — only when the SCM reports a service named exactly `"Bonjour Service"`
-in state `Running`. With no such service, neither is needed and the Bluetooth
-path is all that runs. `bleshim/ENGINEERING.md` has the IL.
+**Keep Bonjour working, not hidden.** A running `"Bonjour Service"` enables
+the game's COM event path. Mono's original `ComAwareEventInfo` throws there;
+`bonjour/` supplies an isolated, guarded framework copy and real connection-point
+subscriptions. Never disable Bonjour to make a test pass, patch a game DLL, or
+replace a runner's installed framework. Tests must exercise real callbacks and
+assert that the game's Bonjour gate is enabled. See `bonjour/README.md` for the
+supported runtime, tests, installation and current limits.
 
 ## Where to start reading
 
