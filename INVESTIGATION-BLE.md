@@ -486,3 +486,67 @@ the same hour:
 The helper-side rule set is small on purpose: one constant, one method, one
 dispatch hook — and it reads like the incident's trace.
 
+### 8.9 Two traps for the price of one heal (November 2 session, the heal grown again)
+
+**Morning trap — the unpaired record.** A ride opened at 0 BPM with a link
+that looked up. The helper's journal read, for the bridge: `Paired=false`,
+`Connected=true`, `ServicesResolved=true`, `services -> []` — and, decisive,
+*no heal at all*. The 8.8 heal opens with a gate ("is the record paired?"),
+and an unpaired record walked out of it silently: no trace, no action. Why
+the record was unpaired is the 8.8 cure working as designed — a lift
+re-creates the record fresh — with a new resident shape underneath:
+connected-but-unpaired over a resolved-empty tree. That trap ends one step
+worse than the paired one: the SMP exchange that would mint a bond only
+starts when a client touches an encrypted characteristic, and the game,
+staring at an empty tree, has none to touch. 0 BPM with the link alive and
+nothing in the walk to break it loose.
+
+**Evening trap — the split brain.** While pairing that record by hand
+(`Device1.Pair()`), BlueZ answered `org.bluez.Error.AlreadyPaired` while
+`Paired` read `false`, and kept reading so across lift-and-rediscover
+cycles. The source holds the verdict (`device.c`,
+`new_authentication_return`): the status is `MGMT_STATUS_ALREADY_PAIRED` —
+a *kernel* management answer, not a record-level one. The earlier session's
+bond had survived the record lift inside the kernel's bond store, because a
+D-Bus `RemoveDevice` skips the kernel unpair when the object itself reports
+`bonded=false`. Three layers holding opposite minds: the record (unpaired),
+the files (gone), the kernel (bonded). From user space there is no lever
+on that split — a confirmed `RemoveDevice` did not clear it, and `Pair`
+kept refusing. A bluetoothd restart is the mend that works (the daemon
+rebuilds from its files; the kernel keys flush with it). That stays a
+deliberate action on the user's side — `pkexec systemctl restart bluetooth`
+inside the local rescue script on this machine, plain `sudo` in anyone
+else's hands — never a root call hidden inside the helper.
+
+**What shipped.** The heal grew the missing branch, so neither trap ends
+in silence any more:
+
+- **connected-but-unpaired over a resolved-empty tree → pair by hand.** The
+  gap is reserved first, so a refused pairing rests inside it — it does not
+  beg at every walk. `Pair()` rides the already-registered agent, the
+  machine half answers silently, the phone asks its owner once. Pairing on
+  a live link re-runs the discovery that fills the tree, and the heal waits
+  a bounded window for that; if the cache still reads empty (the phone app
+  died in between), the record falls to the ordinary lift path of 8.8.
+- **Already Paired on an unpaired record → name it, and rest.** The log
+  line says which split it is, why no user-space call mends it, and what
+  the one cure is; no retry is attempted.
+- **Nothing silent anywhere else either.** A record unpaired-but-unconnected,
+  or paired-less and still resolving, traces its way out of the heal
+  instead of vanishing into a bare `return`.
+
+Phone-side lessons worth the ink: turning Bluetooth off and on kills the
+bridge app's GATT server (iOS suspends the app on the spot), so after any
+BT off/on the app must be re-opened — an iPhone that "seems fine" may accept
+a reconnect on Saturday's bond while serving nothing (connect succeeds,
+tree stays empty). And iOS rotates the bridge's address between sessions
+under heavy re-pairing: nothing on the heal side keys to one frozen
+address, the helper resolves each sensor by what the game names, and both
+this paper and its commits number no devices.
+
+Tests: the traps ride `bleshim/tests/test_gatt_heal.py` (pair by hand;
+phone asleep; kernel split; paired-empty regression; gap fencing; the
+BlueZ-level Pair call). Full suites at commit time: 24/24 helper, 5/5
+patcher, 59/59 fake-walk regression — and the pair-by-hand branch itself
+still owes its first live baptism on real hardware.
+
