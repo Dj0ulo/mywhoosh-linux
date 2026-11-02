@@ -403,7 +403,6 @@ namespace MyWhoosh
             int slot;
 
             internal Poller(string name, MethodInfo method, Type elem)
-
             {
                 this.name = name;
                 this.method = method;

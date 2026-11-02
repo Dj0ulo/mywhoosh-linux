@@ -1482,8 +1482,6 @@ class Server:
             return
         if DEVICE_IFACE not in ifaces:
             return
-        if DEVICE_IFACE not in ifaces:
-            return
         # BlueZ removes a non-bonded device's object when it stops advertising,
         # which is what a sleeping trainer looks like.  The game hears about it
         # as a disconnection, and reconnecting is its decision, not ours.
