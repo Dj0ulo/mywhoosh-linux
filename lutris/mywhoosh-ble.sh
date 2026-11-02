@@ -139,6 +139,17 @@ deps_report() {
     fi
     rm -f "$err"
 
+    # Network controllers (BikeControl and other OpenBikeControl devices) are
+    # found over mDNS by avahi-daemon.  Optional: Bluetooth needs none of it,
+    # so this never fails the check, it only says what will not be found.
+    if $HOST python3 -c "import dbus, sys; sys.exit(0 if dbus.SystemBus().name_has_owner('org.freedesktop.Avahi') else 1)" 2>/dev/null; then
+        say "ok    avahi-daemon (network controllers such as BikeControl)"
+    else
+        say "note  no avahi-daemon -- Bluetooth is unaffected, but network controllers"
+        say "      such as BikeControl will not be found.  It is usually the avahi-daemon"
+        say "      package, enabled with:  sudo systemctl enable --now avahi-daemon"
+    fi
+
     return $ok
 }
 

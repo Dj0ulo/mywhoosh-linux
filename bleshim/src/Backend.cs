@@ -35,13 +35,18 @@ namespace MyWhoosh.Ble
     /// reported it.  Deliberately flat: this is a transport type, not a model.
     class BackendEvent
     {
-        public string Kind;                 // "advert" | "value" | "connection"
+        public string Kind;                 // "advert" | "value" | "connection" | "service" | "service_lost"
         public string Address;              // "AA:BB:CC:DD:EE:FF"
         public string Name;                 // advert only, may be empty
         public List<string> Uuids;          // advert only
         public string Characteristic;       // value only
         public byte[] Value;                // value only
         public bool Connected;              // connection only
+        // service / service_lost only: an mDNS instance for the OpenBike path.
+        public string ServiceType;          // "_openbikecontrol._tcp"
+        public string Host;                 // "bikecontrol-217e.local"
+        public string Ip;                   // "192.168.1.20", IPv4
+        public int Port;
     }
 
     static class Backend
@@ -81,6 +86,7 @@ namespace MyWhoosh.Ble
         static int nextId;
         static DateTime nextAttempt;        // do not retry a missing helper on every call
         static bool announcedMissing;       // ... and do not say so on every retry either
+        static int generation;              // one more per helper connection made
         static readonly Dictionary<int, Pending> Waiting = new Dictionary<int, Pending>();
         // A List used as a queue, not Queue<T>: Queue<T> lives in System.dll on
         // the framework wine-mono ships and in mscorlib on the host's mono, so
@@ -115,6 +121,16 @@ namespace MyWhoosh.Ble
             }
         }
 
+        /// Which helper connection is the current one: it goes up by one each
+        /// time a connection is made.  The helper forgets everything a client
+        /// asked for when that client goes away, so state a caller set up on
+        /// the helper (OpenBike's browse) has to be set up again whenever this
+        /// has moved on.
+        public static int Generation
+        {
+            get { lock (Gate) return generation; }
+        }
+
         static bool Connect()
         {
             lock (Gate)
@@ -138,6 +154,7 @@ namespace MyWhoosh.Ble
                     c.Connect("127.0.0.1", port);
                     c.NoDelay = true;       // notifications are small and want to be prompt
                     client = c;
+                    generation++;
                     var stream = c.GetStream();
                     writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
 
@@ -336,6 +353,10 @@ namespace MyWhoosh.Ble
                 Name = Json.Str(msg, "name", ""),
                 Characteristic = Json.Str(msg, "char"),
                 Connected = Json.Bool(msg, "connected"),
+                ServiceType = Json.Str(msg, "type"),
+                Host = Json.Str(msg, "host", ""),
+                Ip = Json.Str(msg, "address", ""),
+                Port = (int)Json.Num(msg, "port", 0),
             };
             string hex = Json.Str(msg, "value");
             if (hex != null)

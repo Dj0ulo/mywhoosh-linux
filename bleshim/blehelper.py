@@ -24,8 +24,18 @@ process without anything above it changing.
     <-  {"id":4,"ok":true}
     <-  {"ev":"value","addr":"AA:BB:...","char":"00002ad2-...","value":"44024a00..."}
 
-Ops: radios, scan, connect, disconnect, services, chars, read, write, notify.
-Events: advert, value, connection.
+    ->  {"id":5,"op":"browse","type":"_openbikecontrol._tcp","enable":true}
+    <-  {"id":5,"ok":true}
+    <-  {"ev":"service","type":"_openbikecontrol._tcp","name":"BikeControl",
+         "host":"bikecontrol-217e.local","address":"192.168.1.20","port":36867,"txt":[...]}
+
+Ops: radios, scan, connect, disconnect, services, chars, read, write, notify,
+browse.
+Events: advert, value, connection, service, service_lost.
+
+`browse` is the one op that is not Bluetooth: mDNS through avahi-daemon, for
+the game's OpenBike path (network controllers such as BikeControl).  See the
+Zeroconf class.
 
 Usage:
     ./blehelper.py                  # serve on 127.0.0.1:27019
@@ -623,6 +633,148 @@ class Quiescence:
             self.failures.pop(addr, None)
 
 
+class Zeroconf:
+    """mDNS service discovery, through avahi-daemon, for the game's OpenBike path.
+
+    MyWhoosh finds network controllers -- BikeControl on a phone, say -- the
+    OpenBikeControl way: the controller advertises `_openbikecontrol._tcp` and
+    runs a TCP server, and the game browses for it and dials the address it
+    resolves to.  The game does the browsing through Apple Bonjour's COM
+    objects, which needs the `ComAwareEventInfo` wine-mono does not have
+    (../ENGINEERING.md, "The Bonjour gate"), so with the gate shut it simply
+    never looks.  The dialling, though, is the engine's own winsock and works
+    as it is.  So the one missing piece is the browse and resolve, and that is
+    avahi-daemon's whole job on Linux.
+
+    Avahi is on the same system bus as BlueZ, so this needs nothing the helper
+    does not already depend on.  IPv4 only, which is what the game's own
+    ServiceResolved hands on.
+
+    Avahi signals a browser's first results immediately after creating it,
+    and a receiver matched to the browser's own path can only be added once
+    that path is known -- the race its documentation warns about.  So the
+    receivers listen to every ServiceBrowser on the bus, are added before any
+    browser exists, and filter by path; the browser's results arrive on the
+    main loop after ServiceBrowserNew has returned that path, so none is lost.
+    """
+
+    AVAHI = "org.freedesktop.Avahi"
+    SERVER_IFACE = "org.freedesktop.Avahi.Server"
+    BROWSER_IFACE = "org.freedesktop.Avahi.ServiceBrowser"
+    IF_UNSPEC = -1
+    PROTO_INET = 0
+
+    def __init__(self, bus, post):
+        self.bus = bus
+        self.post = post                    # Server.post: the main loop writes
+        self.browsers = {}                  # type -> browser object path
+        # (type, name, interface) -> the event sent.  One service can be seen
+        # on several interfaces (Wi-Fi and Ethernet, say); it is lost only
+        # when it has gone from all of them.
+        self.resolved = {}
+        # The same keys, for resolves still in flight.  A key that leaves
+        # this set before its answer arrives (ItemRemove, stop) was withdrawn,
+        # and the answer is dropped instead of announcing what is already gone.
+        self.resolving = set()
+        for signal, handler in (("ItemNew", self.on_item_new),
+                                ("ItemRemove", self.on_item_remove),
+                                ("Failure", self.on_failure)):
+            bus.add_signal_receiver(handler, dbus_interface=self.BROWSER_IFACE,
+                                    signal_name=signal, path_keyword="path")
+
+    def server(self):
+        return dbus.Interface(self.bus.get_object(self.AVAHI, "/"), self.SERVER_IFACE)
+
+    def type_of(self, path):
+        for stype, bpath in self.browsers.items():
+            if bpath == path:
+                return stype
+        return None
+
+    def browse(self, stype):
+        """Start watching for a service type; idempotent.
+
+        A second request for a type already watched re-announces what has
+        been resolved so far: the game asks again when it reopens a screen,
+        and Avahi will not repeat an ItemNew it has already sent.
+        """
+        if stype in self.browsers:
+            for ev in [e for (t, _, _), e in self.resolved.items() if t == stype]:
+                self.post(ev)
+            return
+        try:
+            path = self.server().ServiceBrowserNew(
+                self.IF_UNSPEC, self.PROTO_INET, stype, "", dbus.UInt32(0))
+        except dbus.DBusException as e:
+            if e.get_dbus_name() == "org.freedesktop.DBus.Error.ServiceUnknown":
+                raise BleError("avahi-daemon is not running, so no %s can be found" % stype)
+            raise
+        self.browsers[stype] = str(path)
+        log("browsing for %s", stype)
+
+    def stop(self, stype=None):
+        """Stop one browser, or every one (the client went away)."""
+        for t in [stype] if stype else list(self.browsers):
+            path = self.browsers.pop(t, None)
+            if path is None:
+                continue
+            for key in [k for k in self.resolved if k[0] == t]:
+                del self.resolved[key]
+            self.resolving = {k for k in self.resolving if k[0] != t}
+            try:
+                dbus.Interface(self.bus.get_object(self.AVAHI, path), self.BROWSER_IFACE).Free()
+            except dbus.DBusException as e:
+                trace("ServiceBrowser.Free(%s): %s", t, e.get_dbus_name())
+            log("stopped browsing for %s", t)
+
+    def on_item_new(self, interface, protocol, name, stype, domain, flags, path=None):
+        stype = self.type_of(path)
+        if stype is None:
+            return                          # someone else's browser on the bus
+        name = str(name)
+        key = (stype, name, int(interface))
+        self.resolving.add(key)
+
+        def resolved(_if, _proto, _name, _type, _domain, host, _aproto, address, port, txt, _flags):
+            if key not in self.resolving:
+                return                      # removed, or stopped, while in flight
+            self.resolving.discard(key)
+            ev = {"ev": "service", "type": stype, "name": name, "host": str(host),
+                  "address": str(address), "port": int(port),
+                  "txt": [bytes(bytearray(t)).decode("utf-8", "replace") for t in txt]}
+            self.resolved[key] = ev
+            log("found %s %r at %s:%d (%s)", stype, name, ev["address"], ev["port"], ev["host"])
+            self.post(ev)
+
+        def failed(e):
+            self.resolving.discard(key)
+            log("cannot resolve %s %r: %s", stype, name, e.get_dbus_message())
+
+        # Asynchronous, so a phone that has gone quiet between its
+        # announcement and our question costs Avahi's timeout, not the loop's.
+        self.server().ResolveService(interface, protocol, name, stype, domain,
+                                     self.PROTO_INET, dbus.UInt32(0),
+                                     reply_handler=resolved, error_handler=failed)
+
+    def on_item_remove(self, interface, protocol, name, stype, domain, flags, path=None):
+        stype = self.type_of(path)
+        if stype is None:
+            return
+        name = str(name)
+        self.resolving.discard((stype, name, int(interface)))
+        if self.resolved.pop((stype, name, int(interface)), None) is None:
+            return
+        if any(k[:2] == (stype, name) for k in self.resolved):
+            return                          # still there on another interface
+        log("lost %s %r", stype, name)
+        self.post({"ev": "service_lost", "type": stype, "name": name})
+
+    def on_failure(self, error, path=None):
+        stype = self.type_of(path)
+        if stype is not None:
+            log("browsing for %s failed: %s", stype, error)
+
+
 HEAL = object()     # a worker job of the helper's own, never from the client
 
 
@@ -671,6 +823,10 @@ class Server:
         # whether a heal pass is already waiting on the worker.
         self.grace_timer = None
         self.heal_queued = False
+
+        # mDNS for the game's OpenBike path; main() sets it once the bus is
+        # up.  Main-loop only, like the BlueZ signal handlers.
+        self.zeroconf = None
 
     # ------------------------------------------------------------ transport
 
@@ -741,6 +897,8 @@ class Server:
             self.silent.clear()
         self.start_grace()
         self.stop_scan()
+        if self.zeroconf is not None:
+            self.zeroconf.stop()
 
     def start_grace(self):
         with self.meta_lock:
@@ -950,6 +1108,31 @@ class Server:
                 log("scan: unexpected: %s: %s", type(e).__name__, e)
                 self.send({"id": rid, "ok": False,
                            "error": "%s: %s" % (type(e).__name__, e)})
+                return
+            self.send({"id": rid, "ok": True})
+            return
+
+        if op == "browse":
+            # mDNS, for the OpenBike path.  Answered here: creating or freeing
+            # an Avahi browser is one short D-Bus call, and what it finds
+            # arrives later as "service" and "service_lost" events.
+            stype = req.get("type") or ""
+            try:
+                if self.zeroconf is None:
+                    raise BleError("mDNS is not available in this helper")
+                if not stype:
+                    raise BleError("browse needs a service type")
+                if req.get("enable"):
+                    self.zeroconf.browse(stype)
+                else:
+                    self.zeroconf.stop(stype)
+            except BleError as e:
+                log("browse: %s", e)
+                self.send({"id": rid, "ok": False, "error": str(e)})
+                return
+            except dbus.DBusException as e:
+                log("browse: %s", e.get_dbus_message())
+                self.send({"id": rid, "ok": False, "error": e.get_dbus_message()})
                 return
             self.send({"id": rid, "ok": True})
             return
@@ -1466,6 +1649,7 @@ def main():
     bus.add_signal_receiver(server.on_interfaces_removed,
                             dbus_interface=OM_IFACE,
                             signal_name="InterfacesRemoved")
+    server.zeroconf = Zeroconf(bus, server.post)
     server.refresh_radios()
     server.remember_paths()
     server.restore_notifications()
