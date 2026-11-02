@@ -105,6 +105,11 @@ ADVERT_TIMEOUT = 20           # seconds waiting for a named device to be on the 
 CONNECT_BACKOFF_BASE = 10     # seconds after the first failure
 CONNECT_BACKOFF_MAX = 120     # seconds between attempts at the ladder's top
 GATT_REBUILD_GAP = 90         # seconds between record lifts for one address
+# After an explicit Pair() on a live link, the discovery that fills the
+# tree re-runs on its own; this is the bounded window the heal waits for
+# it before declaring the cache empty again and falling to the lift.
+PAIR_SETTLE_TRIES = 8         # polls after an explicit Pair
+PAIR_SETTLE_PAUSE = 1.0       # seconds between those polls
 
 verbose = False
 
@@ -385,6 +390,28 @@ class Bluez:
         """
         self.adapter().RemoveDevice(dbus.ObjectPath(self.device_path(addr)))
         log("%s: record removed -- the next connect re-pairs and rediscovers", addr)
+
+    def pair_device(self, addr):
+        """Run Device1.Pair() by hand, the way the game's own tap would have.
+
+        The SMP exchange only starts when a client touches an encrypted
+        characteristic, and a record left with an empty tree gives the game
+        nothing to touch: the walk dead-ends with the link up and 0 BPM.
+        Pairing explicitly while the bridge is on hand mends it; the
+        pairing agent carries the machine half, and the phone asks its
+        owner to confirm once.
+
+        The kernel can refuse with Already Paired while this record itself
+        reads unpaired -- the kernel kept Saturday's bond through the
+        record lift, something only a bluetoothd restart clears.  The
+        caller reads that error and says so; no call from this handle can
+        mend a split that lives below BlueZ.
+        """
+        path = self.device_path(addr)
+        if path not in self.objects():
+            raise BleError("%s has no BlueZ record to pair" % addr)
+        dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE_IFACE).Pair()
+        log("%s: paired", addr)
 
     # ----------------------------------------------------------------- gatt
 
@@ -994,14 +1021,70 @@ class Server:
         the record lifted and then watches for its bridge, so the re-pairing
         runs the moment the phone app wakes -- no cache command by hand, no
         extra tap in the game, only the prompt to accept.
+
+        A second trap mates here.  After a lift, BlueZ re-creates the record
+        fresh and UNPAIRED; if the bridge then wakes with its app closed, the
+        link settles connected-but-unpaired over a resolved-empty tree, and
+        the walk that would start pairing has no characteristic to reach for
+        -- the bond never forms and 0 BPM sticks while the link looks alive.
+        This heal pairs that record by hand: the agent answers the machine
+        half, the phone asks its owner once, and the bond's own discovery
+        fills the tree.  A bond that still discovers nothing falls to the
+        ordinary lift below.
         """
         with self.gatt_heal_lock:
             now = time.monotonic()
             if now - self.gatt_heal.get(addr, 0.0) < GATT_REBUILD_GAP:
                 trace("%s: a GATT rebuild is still resting within the gap", addr)
                 return
-        if not bz.device_props(addr).get("Paired"):
-            return
+        props = bz.device_props(addr)
+        if not props.get("Paired"):
+            if not props.get("Connected") or not props.get("ServicesResolved"):
+                # An unpaired record that is not connected, or whose tree is
+                # still resolving, is a fresh sensor serving its ordinary
+                # flow: pairing starts by itself the first time the game
+                # touches an encrypted characteristic.  Leave it alone.
+                trace("%s: unpaired with an empty tree but %s -- not the "
+                      "trap; the game's own flow carries pairing from here",
+                      addr, "unconnected" if not props.get("Connected")
+                            else "still resolving")
+                return
+            # The unpaired trap: a connected record over a resolved-empty
+            # tree pairs by hand, or it never pairs at all.  The gap is
+            # reserved first, so a refused pairing rests inside it instead
+            # of begging at every walk.
+            with self.gatt_heal_lock:
+                self.gatt_heal[addr] = time.monotonic()
+            log("%s: connected but unpaired over a resolved-empty tree -- "
+                "pairing by hand (accept the prompt on the phone)", addr)
+            try:
+                bz.pair_device(addr)
+            except (BleError, dbus.DBusException) as e:
+                if isinstance(e, dbus.DBusException) \
+                        and e.get_dbus_name() == "org.bluez.Error.AlreadyPaired":
+                    log("%s: the kernel holds a bond this record no longer "
+                        "names (Already Paired, yet the record reads "
+                        "unpaired) -- no user-space call mends that split; "
+                        "restart the bluetooth service, then re-tap this "
+                        "sensor in the game", addr)
+                else:
+                    log("%s: pairing by hand refused (%s); a later walk of "
+                        "this sensor tries again", addr, e)
+                return
+            # Bonded at last.  Pairing on a live link re-runs the discovery
+            # that fills the tree on its own; wait a bounded moment for the
+            # cache to fill before deciding it needs a lift.
+            for _ in range(PAIR_SETTLE_TRIES):
+                tree = bz.services(addr)
+                if tree:
+                    log("%s: bonded and the tree serves %d service(s) -- "
+                        "the next walk reads BPM", addr, len(tree))
+                    return
+                time.sleep(PAIR_SETTLE_PAUSE)
+            log("%s: bonded but its cache still reads empty -- lifting the "
+                "record so the next connect discovers for real", addr)
+            # Falls through: the record reads paired the same way the
+            # original trap does, and the lift below has always mended it.
         with self.gatt_heal_lock:
             self.gatt_heal[addr] = time.monotonic()
         log("%s: paired but its GATT tree reads empty -- lifting the record "
@@ -1070,10 +1153,11 @@ class Server:
         if op == "services":
             out = bz.services(addr)
             if not out:
-                # An empty tree on a paired device is BlueZ trusting a
-                # resolved-but-empty cache; the lift (worker-side) makes the
-                # NEXT walk of this sensor discover for real.  This reply
-                # still leaves right now.
+                # An empty tree reads twice: paired-but-empty (BlueZ trusting
+                # a resolved-but-empty cache it will never walk again) and
+                # connected-but-unpaired (the SMP exchange that would mint
+                # the bond has no client to start it).  Both get a heal on
+                # the worker side; this reply still leaves right now.
                 self.maybe_rebuild_gatt(bz, addr)
             return {"services": out}
 
