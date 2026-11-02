@@ -161,8 +161,10 @@ rather than an exception, so it is worth remembering when one appears.
 Newline-delimited JSON on `127.0.0.1:27019`, one client at a time.
 
 - Requests carry `id` and `op`: `radios`, `scan`, `connect`, `disconnect`,
-  `services`, `chars`, `read`, `write`, `notify`. Replies carry the same `id`.
-- Unsolicited events carry `event`: `advert`, `value`, `connection`.
+  `services`, `chars`, `read`, `write`, `notify`, `browse`. Replies carry the
+  same `id`.
+- Unsolicited events carry `event`: `advert`, `value`, `connection`, and for
+  `browse`, `service` and `service_lost`.
 - The shim connects lazily and retries every 5 s, so starting the helper after
   the game still works.
 
@@ -245,7 +247,64 @@ Bluetooth path appear to require a COM server and a patched runtime, and that
 appearance is entirely an artefact of the service. `./install.sh --verify`
 reports the gate state; the service is not ours and the script never removes it.
 
+## The OpenBike path, without Bonjour
+
+The gate also shuts the game's OpenBike path: network controllers such as
+BikeControl, which speak the OpenBikeControl protocol over TCP. That path
+needs much less from Bonjour than it looks. Read out of the IL:
+
+```
+MyWhoosh::OBC_Initialize(cb)   new OpenBikeManager; OBM_Initialize();
+                               DelegateCallbacks.OpenBikeDataCallback = cb
+MyWhoosh::OBC_StartScan()      OBM_StartScan(): Browse("_openbikecontrol._tcp.")
+OpenBikeManager::ServiceFound  Resolve, once per name (services.ContainsKey)
+OpenBikeManager::ServiceResolved
+                               FOpenBikeDataStruct { ipAddress, port, hostName }
+                               -> OpenBikeDataCallback.Invoke
+```
+
+The callback is the engine's native code, and it opens the connection to the
+controller with its own winsock, which works under Wine. So Bonjour is only
+ever asked to browse and resolve one service type. And because `OBC_Initialize`
+stores the callback *after* `OBM_Initialize` returns at its gate check, with
+the gate shut the callback is still there, waiting for someone to call it.
+
+So that is all that is done, and none of it touches Bonjour:
+
+- `blehelper.py`'s `browse` op runs an Avahi `ServiceBrowser` for the type and
+  sends each resolved instance as a `service` event (name, host, IPv4 address,
+  port, TXT), and `service_lost` once it is gone from every interface. Avahi is
+  on the same system bus as BlueZ, so nothing new is needed.
+- `src/OpenBike.cs` asks for that browse and, for each `service`, builds the
+  `FOpenBikeDataStruct` `ServiceResolved` would have built and invokes the
+  game's own `OpenBikeDataCallback` with it, once per name per scan, as the
+  game does. The call goes out on a thread-pool thread, not Backend's event
+  dispatcher, because the engine may dial the controller before it returns and
+  the trainer's values travel through that dispatcher too.
+- The game asks for its scan once per screen, but the helper forgets a browse
+  when its client goes away, and a helper started after the game never got the
+  request. So OpenBike keeps the browse in step on a 5 s timer: while the game
+  wants a scan and the browse was not set up on the current connection
+  (`Backend.Generation`), it asks again. A helper that refuses (no
+  avahi-daemon) is asked again every 30 s rather than every 5.
+- `../exportshim` points the `OBC_StartScan` and `OBC_StopScan` slots at
+  `OpenBike.StartScan` and `StopScan`. The shim is started from the Bluetooth
+  path's first types, possibly after the game has already asked for its scan
+  through the original exports, so `OpenBike.Attach` starts the scan if the
+  callback is already set.
+
+The gate stays shut, and must: `WahooProgram` is behind it too, and so is the
+`COMException` that sent this project here in the first place.
+
 ## Open
+
+**The OpenBike path has been ridden once, on one setup:** MyWhoosh HD under
+GE-Proton 11-11 through Lutris, BikeControl on Android and a Zwift Ride. The
+engine does call `OBC_StartScan` with the gate shut, dials what it is handed,
+and shifted on the Ride's buttons once "Virtual Shifting HUD" was on in the
+game's settings. Not yet seen: the standard edition, a controller other than
+BikeControl, and a helper restarted mid-ride (the re-browse is exercised only
+by reading the code).
 
 **Only the pieces have been verified on a clean install, not the whole.** The
 Lutris installer's file steps were dry-run through Lutris' own `CommandsMixin`

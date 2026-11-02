@@ -25,8 +25,15 @@ The other twelve return a `float` — `BT_GetHeart`, `BT_GetPower`,
 answer from the wrong register, and wine-mono leaves a pointer there: see
 *Heart rate as a nine-digit number* below.
 
-This directory fixes both without touching the game: it finds the function
-pointers in the running process and replaces them with code of our own.
+A third set is not broken by wine-mono but by the Bonjour gate:
+`OBC_StartScan` and `OBC_StopScan`, the game's search for network controllers
+such as BikeControl, do nothing with no Bonjour service running. Those two are
+pointed at `../bleshim/src/OpenBike.cs`, which searches with Avahi instead (see
+*The OpenBike path, without Bonjour* in `../bleshim/ENGINEERING.md`).
+
+This directory fixes all of them without touching the game: it finds the
+function pointers in the running process and replaces them with code of our
+own.
 
 ```sh
 ./build.sh

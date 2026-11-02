@@ -1,6 +1,8 @@
 // Serve the four byref-array exports of WindowsConnectivity.dll ourselves,
-// because wine-mono's native marshaller will not -- and put right the return
-// register of the twelve that return a float (see "float returns" below).
+// because wine-mono's native marshaller will not -- put right the return
+// register of the twelve that return a float (see "float returns" below) --
+// and point OBC_StartScan/OBC_StopScan at ../bleshim/src/OpenBike.cs, since
+// behind the Bonjour gate they do nothing (see "OpenBike" below).
 //
 // The problem.  Four of the DLL's 98 unmanaged exports take the device list by
 // reference:
@@ -150,6 +152,74 @@ namespace MyWhoosh
             Log("hooked " + done + "/" + Exports.Length + " exports");
 
             MirrorFloatReturns(module, game);
+            HookOpenBike(module);
+        }
+
+
+        // ------------------------------------------------------ OpenBike
+
+        // OBC_StartScan and OBC_StopScan browse Bonjour for network
+        // controllers (BikeControl and the like) -- through COM objects and
+        // the ComAwareEventInfo wine-mono does not implement, so behind the
+        // Bonjour gate they do nothing at all.  ../bleshim/src/OpenBike.cs
+        // does the same job with Avahi, through the helper, and calls the
+        // game's own callback with what it finds; these two slots are pointed
+        // at it.  Both are void(void), so nothing is marshalled either way.
+        //
+        // OpenBike lives in the Windows assembly, which is the one that
+        // started us (../bleshim/src/Loader.cs) and so is always loaded here;
+        // it is found by name because this assembly is built without it.
+
+        const string BleAssembly = "Windows";
+        const string OpenBikeType = "MyWhoosh.Ble.OpenBike";
+
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        delegate void VoidFn();
+
+        static void HookOpenBike(IntPtr module)
+        {
+            Type openBike = null;
+            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                if (a.GetName().Name == BleAssembly) { openBike = a.GetType(OpenBikeType, false); break; }
+            if (openBike == null) { Log("OpenBike: no " + OpenBikeType + " loaded; OBC exports left alone"); return; }
+
+            int done = 0;
+            foreach (string pair in new[] { "OBC_StartScan:StartScan", "OBC_StopScan:StopScan" })
+            {
+                string export = pair.Split(':')[0], target = pair.Split(':')[1];
+                MethodInfo mi = openBike.GetMethod(target, BindingFlags.Public | BindingFlags.Static);
+                if (mi == null) { Log(export + ": " + OpenBikeType + " has no " + target); continue; }
+                if (HookVoid(module, export, (VoidFn)Delegate.CreateDelegate(typeof(VoidFn), mi))) done++;
+            }
+            Log("OpenBike: hooked " + done + "/2 exports");
+            if (done != 2) return;
+
+            // The game may have asked for its scan already, through the
+            // original exports; OpenBike.Attach starts it if so.
+            MethodInfo attach = openBike.GetMethod("Attach", BindingFlags.Public | BindingFlags.Static);
+            if (attach != null) attach.Invoke(null, null);
+        }
+
+        static bool HookVoid(IntPtr module, string name, VoidFn fn)
+        {
+            IntPtr stub = GetProcAddress(module, name);
+            if (stub == IntPtr.Zero) { Log(name + ": not exported"); return false; }
+            IntPtr slot = DecodeStub(stub, name);
+            if (slot == IntPtr.Zero) return false;
+
+            IntPtr thunk = Marshal.GetFunctionPointerForDelegate(fn);
+            Rooted.Add(fn);
+            IntPtr was = Marshal.ReadIntPtr(slot);
+
+            uint old;
+            bool reprotected = VirtualProtect(slot, (IntPtr)IntPtr.Size, PAGE_READWRITE, out old);
+            Marshal.WriteIntPtr(slot, thunk);
+            if (reprotected) VirtualProtect(slot, (IntPtr)IntPtr.Size, old, out old);
+            if (Marshal.ReadIntPtr(slot) != thunk) { Log(name + ": slot write did not stick"); return false; }
+
+            Log(name + ": slot 0x" + slot.ToString("x16") + " 0x" + was.ToString("x16")
+                + " -> 0x" + thunk.ToString("x16"));
+            return true;
         }
 
 
