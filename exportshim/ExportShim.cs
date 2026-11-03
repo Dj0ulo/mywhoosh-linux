@@ -166,6 +166,16 @@ namespace MyWhoosh
         // game's own callback with what it finds; these two slots are pointed
         // at it.  Both are void(void), so nothing is marshalled either way.
         //
+        // Two more slots are the engine asking whether network discovery is
+        // there at all: WD_GetNetworkState (WahooProgram.isBonjourEnabled,
+        // false behind the gate) and WD_GetDirconServiceAvailability
+        // (WahooProgram.GetBonjourService: is the Bonjour service installed).
+        // The second is what the controller button checks; on false it
+        // offers to install Bonjour ("Dircon Service Unavailable") instead of
+        // scanning.  Once the two OBC slots are ours, discovery does work, so
+        // both answer true.  Only the answers change: the field, and every
+        // Wahoo path that reads it inside the assembly, are left as they are.
+        //
         // OpenBike lives in the Windows assembly, which is the one that
         // started us (../bleshim/src/Loader.cs) and so is always loaded here;
         // it is found by name because this assembly is built without it.
@@ -175,6 +185,12 @@ namespace MyWhoosh
 
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         delegate void VoidFn();
+
+        // A 4-byte BOOL, as mono marshals the game's own `bool` return: a
+        // caller reading al or eax sees 1 either way.
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        delegate bool BoolFn();
 
         static void HookOpenBike(IntPtr module)
         {
@@ -189,10 +205,23 @@ namespace MyWhoosh
                 string export = pair.Split(':')[0], target = pair.Split(':')[1];
                 MethodInfo mi = openBike.GetMethod(target, BindingFlags.Public | BindingFlags.Static);
                 if (mi == null) { Log(export + ": " + OpenBikeType + " has no " + target); continue; }
-                if (HookVoid(module, export, (VoidFn)Delegate.CreateDelegate(typeof(VoidFn), mi))) done++;
+                if (HookSlot(module, export, Delegate.CreateDelegate(typeof(VoidFn), mi))) done++;
             }
-            Log("OpenBike: hooked " + done + "/2 exports");
-            if (done != 2) return;
+            if (done == 2)
+            {
+                // Only with discovery in place: without it, true would make
+                // the screen wait on a scan that cannot find anything.
+                foreach (string pair in new[] { "WD_GetNetworkState:NetworkState",
+                                                "WD_GetDirconServiceAvailability:DirconServiceAvailable" })
+                {
+                    string export = pair.Split(':')[0], target = pair.Split(':')[1];
+                    MethodInfo mi = openBike.GetMethod(target, BindingFlags.Public | BindingFlags.Static);
+                    if (mi == null) { Log(export + ": " + OpenBikeType + " has no " + target); continue; }
+                    if (HookSlot(module, export, Delegate.CreateDelegate(typeof(BoolFn), mi))) done++;
+                }
+            }
+            Log("OpenBike: hooked " + done + "/4 exports");
+            if (done < 2) return;
 
             // The game may have asked for its scan already, through the
             // original exports; OpenBike.Attach starts it if so.
@@ -200,7 +229,7 @@ namespace MyWhoosh
             if (attach != null) attach.Invoke(null, null);
         }
 
-        static bool HookVoid(IntPtr module, string name, VoidFn fn)
+        static bool HookSlot(IntPtr module, string name, Delegate fn)
         {
             IntPtr stub = GetProcAddress(module, name);
             if (stub == IntPtr.Zero) { Log(name + ": not exported"); return false; }

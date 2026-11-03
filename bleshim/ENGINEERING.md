@@ -293,6 +293,16 @@ So that is all that is done, and none of it touches Bonjour:
   through the original exports, so `OpenBike.Attach` starts the scan if the
   callback is already set.
 
+- The controller button asks `WD_GetDirconServiceAvailability` (is the
+  Bonjour service installed?) and, on false, offers to run the game's own
+  `bonjoursdksetup.exe` ("Dircon Service Unavailable") instead of calling
+  `OBC_StartScan`. `WD_GetNetworkState` (`WahooProgram.isBonjourEnabled`) is
+  asked at startup. Both were false on the first rides, and BikeControl was
+  only found because `Attach` had started a scan at launch. `../exportshim`
+  points both slots at `OpenBike`, which answers true once the two OBC slots
+  are ours. The field itself is untouched, so every Wahoo path inside the
+  assembly still sees false.
+
 The gate stays shut, and must: `WahooProgram` is behind it too, and so is the
 `COMException` that sent this project here in the first place.
 
