@@ -355,45 +355,129 @@ class Bluez:
 
     # ----------------------------------------------------------------- gatt
 
-    def services(self, addr):
-        prefix = self.device_path(addr) + "/"
-        out = []
-        for path, ifaces in sorted(self.objects().items()):
-            svc = ifaces.get(SERVICE_IFACE)
-            if svc and path.startswith(prefix):
-                out.append({"uuid": str(svc["UUID"]).lower()})
-        return out
+    # Some devices carry two services with the same UUID.  A watch relaying
+    # heart rate does it deliberately: its private 180d reads and notifies only
+    # over an encrypted link (a client without a bond gets
+    # InsufficientEncryption), while the instance it raises during a workout
+    # carries a notify-only 2a37 that anyone may subscribe to.  The protocol
+    # names a characteristic by device and UUID alone, so with both instances
+    # in the tree the game used to see 180d twice and two 2a37s under it, and
+    # every op landed on whichever object sorted first.  Now one instance per
+    # UUID is chosen -- the one most likely to work without a bond -- and
+    # every listing, read, write and subscribe acts on that same view.
 
-    def characteristics(self, addr, service_uuid):
+    # Flags an ask can require, so a read never lands on a notify-only twin.
+    WANT_FLAGS = {
+        "notify": {"notify", "indicate"},
+        "read": {"read"},
+        "write": {"write", "write-without-response", "reliable-write"},
+    }
+
+    # Refusals that say "this instance wants a bond", where its twin might not.
+    SECURITY_ERRORS = {
+        "org.bluez.Error.InsufficientEncryption",
+        "org.bluez.Error.InsufficientAuthorization",
+        "org.bluez.Error.InsufficientAuthentication",
+        "org.bluez.Error.AuthenticationRejected",
+    }
+
+    def services(self, addr):
+        """One entry per service UUID, in tree order.
+
+        The game keeps its own service map keyed by UUID, and Windows, which
+        it was written against, shows a client one object per service.
+        characteristics() decides which instance stands behind the entry.
+        """
         objs = self.objects()
         prefix = self.device_path(addr) + "/"
-        wanted = {path for path, ifaces in objs.items()
-                  if path.startswith(prefix)
-                  and SERVICE_IFACE in ifaces
-                  and str(ifaces[SERVICE_IFACE]["UUID"]).lower() == service_uuid.lower()}
+        out, shown = [], set()
+        for path, ifaces in sorted(objs.items()):
+            svc = ifaces.get(SERVICE_IFACE)
+            if not svc or not path.startswith(prefix):
+                continue
+            uuid = str(svc["UUID"]).lower()
+            if uuid not in shown:
+                shown.add(uuid)
+                out.append({"uuid": uuid})
+        return out
+
+    @staticmethod
+    def instance_score(objs, service_path):
+        """Rank a service instance among siblings sharing its UUID.
+
+        One that notifies through a characteristic that is not also readable
+        (the open, broadcast pattern) scores 3, any other notifier 2, an
+        instance without one 1.
+        """
+        best = 1
+        for ifaces in objs.values():
+            ch = ifaces.get(CHAR_IFACE)
+            if not ch or str(ch.get("Service", "")) != service_path:
+                continue
+            flags = {str(f) for f in ch.get("Flags", [])}
+            if flags & {"notify", "indicate"}:
+                best = max(best, 2 if "read" in flags else 3)
+        return best
+
+    def characteristic_paths(self, addr, service_uuid):
+        """(path, {uuid, flags}) for the chosen instance of a service."""
+        objs = self.objects()
+        prefix = self.device_path(addr) + "/"
+        paths = [path for path, ifaces in objs.items()
+                 if path.startswith(prefix)
+                 and SERVICE_IFACE in ifaces
+                 and str(ifaces[SERVICE_IFACE]["UUID"]).lower() == service_uuid.lower()]
+        if not paths:
+            return []
+        # Ties go to the newest path: a peripheral raises its open instance
+        # after its private one.  max() keeps the first of equals, hence the
+        # reverse sort.
+        chosen = max(sorted(paths, reverse=True), key=lambda p: self.instance_score(objs, p))
         out = []
         for path, ifaces in sorted(objs.items()):
             ch = ifaces.get(CHAR_IFACE)
-            if not ch or str(ch["Service"]) not in wanted:
+            if not ch or str(ch["Service"]) != chosen:
                 continue
-            out.append({"uuid": str(ch["UUID"]).lower(),
-                        "flags": [str(f) for f in ch.get("Flags", [])]})
+            out.append((path, {"uuid": str(ch["UUID"]).lower(),
+                               "flags": [str(f) for f in ch.get("Flags", [])]}))
         return out
 
-    def char_path(self, addr, char_uuid):
-        prefix = self.device_path(addr) + "/"
-        for path, ifaces in sorted(self.objects().items()):
-            ch = ifaces.get(CHAR_IFACE)
-            if ch and path.startswith(prefix) and str(ch["UUID"]).lower() == char_uuid.lower():
-                return path
-        raise BleError("%s has no characteristic %s" % (addr, char_uuid))
+    def characteristics(self, addr, service_uuid):
+        return [c for _, c in self.characteristic_paths(addr, service_uuid)]
 
-    def char(self, addr, char_uuid):
-        return dbus.Interface(self.bus.get_object(BLUEZ, self.char_path(addr, char_uuid)), CHAR_IFACE)
+    def char_candidates(self, addr, char_uuid, want=None):
+        """Every characteristic path with this UUID, the best for `want` first.
+
+        Paths carrying the flags the ask needs go first, then by their
+        instance's score, then newest first -- the same order
+        characteristics() chooses by, so the instance the game was shown is
+        the one its reads, writes and subscribes reach.
+        """
+        objs = self.objects()
+        prefix = self.device_path(addr) + "/"
+        wanted = self.WANT_FLAGS.get(want, set())
+        found = []
+        for path, ifaces in sorted(objs.items(), reverse=True):
+            ch = ifaces.get(CHAR_IFACE)
+            if not ch or not path.startswith(prefix) or str(ch["UUID"]).lower() != char_uuid.lower():
+                continue
+            flags = {str(f) for f in ch.get("Flags", [])}
+            fits = not wanted or bool(flags & wanted)
+            found.append((0 if fits else 1, -self.instance_score(objs, str(ch["Service"])), path))
+        if not found:
+            raise BleError("%s has no characteristic %s" % (addr, char_uuid))
+        found.sort(key=lambda t: t[:2])          # stable: newest first among equals
+        return [path for _, _, path in found]
+
+    def char_path(self, addr, char_uuid, want=None):
+        return self.char_candidates(addr, char_uuid, want)[0]
+
+    def char_at(self, path):
+        return dbus.Interface(self.bus.get_object(BLUEZ, path), CHAR_IFACE)
 
     def read(self, addr, char_uuid):
         try:
-            value = self.char(addr, char_uuid).ReadValue({})
+            value = self.char_at(self.char_path(addr, char_uuid, "read")).ReadValue({})
         except dbus.DBusException as e:
             raise BleError("ReadValue failed: %s" % e.get_dbus_message())
         return bytes(bytearray(value))
@@ -401,25 +485,50 @@ class Bluez:
     def write(self, addr, char_uuid, value, with_response):
         options = {"type": "request" if with_response else "command"}
         try:
-            self.char(addr, char_uuid).WriteValue(dbus.Array(value, signature="y"), options)
+            self.char_at(self.char_path(addr, char_uuid, "write")).WriteValue(
+                dbus.Array(value, signature="y"), options)
         except dbus.DBusException as e:
             raise BleError("WriteValue failed: %s" % e.get_dbus_message())
 
-    def notify(self, addr, char_uuid, enable):
-        char = self.char(addr, char_uuid)
-        try:
-            if enable:
-                char.StartNotify()
-            else:
-                char.StopNotify()
-        except dbus.DBusException as e:
-            # Subscribing twice is the game re-pairing a sensor it already has,
-            # which is not a failure worth reporting up.
-            if e.get_dbus_name() == "org.bluez.Error.InProgress" and enable:
-                trace("%s %s already notifying", addr, char_uuid)
-                return
-            raise BleError("%s failed: %s" % ("StartNotify" if enable else "StopNotify",
-                                              e.get_dbus_message()))
+    def notify(self, addr, char_uuid, enable, path=None):
+        """Subscribe or unsubscribe; returns the path acted on.
+
+        Subscribing walks the candidates in rank order and falls through a
+        refusal that asks for a bond to the next instance, so a watch with a
+        workout running ends up on its open 2a37 without a pairing prompt.
+        Unsubscribing goes to `path`, the object that actually subscribed,
+        when the caller recorded one: ranking again could pick its twin.
+        """
+        if not enable:
+            path = path or self.char_path(addr, char_uuid, "notify")
+            try:
+                self.char_at(path).StopNotify()
+            except dbus.DBusException as e:
+                raise BleError("StopNotify failed: %s" % e.get_dbus_message())
+            return path
+        candidates = self.char_candidates(addr, char_uuid, "notify")
+        if path in candidates:
+            # Already subscribed there: ask the same object again rather than
+            # opening a second subscription on its twin.
+            candidates.remove(path)
+            candidates.insert(0, path)
+        failure = None
+        for path in candidates:
+            try:
+                self.char_at(path).StartNotify()
+                return path
+            except dbus.DBusException as e:
+                # Subscribing twice is the game re-pairing a sensor it already
+                # has, which is not a failure worth reporting up.
+                if e.get_dbus_name() == "org.bluez.Error.InProgress":
+                    trace("%s %s already notifying", addr, char_uuid)
+                    return path
+                failure = e
+                if e.get_dbus_name() not in self.SECURITY_ERRORS:
+                    break
+                trace("%s %s: %s on %s, trying the next instance",
+                      addr, char_uuid, e.get_dbus_name(), path)
+        raise BleError("StartNotify failed: %s" % failure.get_dbus_message())
 
 
 class BleError(Exception):
@@ -483,6 +592,7 @@ class Server:
         self.scanning = False
         self.meta_lock = threading.Lock()
         self.subscribed = set()             # (addr, char uuid) the client wants
+        self.sub_path = {}                  # (addr, char uuid) -> path that subscribed
         self.silent = set()                 # devices reported without service UUIDs
         self.char_addr = {}                 # char object path -> (addr, uuid)
         self.connected = {}                 # addr -> last reported Connected
@@ -563,13 +673,16 @@ class Server:
                 self.work.get_nowait()
         except queue.Empty:
             pass
-        for addr, uuid in list(self.lookup_meta("subscribed")):
+        with self.meta_lock:
+            subs = [(key, self.sub_path.get(key)) for key in self.subscribed]
+        for (addr, uuid), path in subs:
             try:
-                self.main_bluez.notify(addr, uuid, False)
+                self.main_bluez.notify(addr, uuid, False, path)
             except (BleError, dbus.DBusException):
                 pass
         with self.meta_lock:
             self.subscribed.clear()
+            self.sub_path.clear()
             self.char_addr.clear()
             self.silent.clear()
         self.stop_scan()
@@ -842,6 +955,7 @@ class Server:
             with self.meta_lock:
                 for key in [k for k in self.subscribed if k[0] == addr]:
                     self.subscribed.discard(key)
+                    self.sub_path.pop(key, None)
             bz.disconnect(addr)
             self.quiescence.clear(addr)     # a fresh ask after a disconnect is earned
             return {}
@@ -850,14 +964,11 @@ class Server:
             return {"services": bz.services(addr)}
 
         if op == "chars":
-            chars = bz.characteristics(addr, (req.get("service") or "").lower())
+            chars = bz.characteristic_paths(addr, (req.get("service") or "").lower())
             with self.meta_lock:
-                for c in chars:
-                    try:
-                        self.char_addr[bz.char_path(addr, c["uuid"])] = (addr, c["uuid"])
-                    except BleError:
-                        pass
-            return {"chars": chars}
+                for path, c in chars:
+                    self.char_addr[path] = (addr, c["uuid"])
+            return {"chars": [c for _, c in chars]}
 
         if op == "read":
             return {"value": bz.read(addr, char).hex()}
@@ -869,22 +980,23 @@ class Server:
 
         if op == "notify":
             enable = bool(req.get("enable"))
-            bz.notify(addr, char, enable)
+            key = (addr, char)
             with self.meta_lock:
-                self.char_addr[bz.char_path(addr, char)] = (addr, char)
+                recorded = self.sub_path.get(key)
+            # The values arrive on whichever object took the subscription, so
+            # that is the one mapped, and the one a later StopNotify goes to.
+            used = bz.notify(addr, char, enable, recorded)
+            with self.meta_lock:
+                self.char_addr[used] = key
                 if enable:
-                    self.subscribed.add((addr, char))
+                    self.subscribed.add(key)
+                    self.sub_path[key] = used
                 else:
-                    self.subscribed.discard((addr, char))
+                    self.subscribed.discard(key)
+                    self.sub_path.pop(key, None)
             return {}
 
         raise BleError("unknown op %r" % op)
-
-    def lookup_meta(self, which):
-        with self.meta_lock:
-            if which == "subscribed":
-                return set(self.subscribed)
-            return set(self.char_addr.items())
 
     def addr_of(self, path):
         """The device address behind a BlueZ object path, from memory when we
@@ -1051,6 +1163,7 @@ class Server:
                 self.scanning = False
             with self.meta_lock:
                 self.subscribed.clear()
+                self.sub_path.clear()
                 self.char_addr.clear()
                 self.silent.clear()
                 lost = [addr for addr, connected in self.connected.items() if connected]
