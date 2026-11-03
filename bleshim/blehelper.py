@@ -956,7 +956,10 @@ class Server:
                    "uuids": uuids,
                    "rssi": int(props.get("RSSI", 0))})
 
-    def on_properties_changed(self, iface, changed, invalidated, path=None):
+    def on_properties_changed(self, iface, changed, invalidated=None, path=None):
+        # `invalidated` defaults because dbus-python calls this straight: a
+        # sender omitting it would be a TypeError swallowed by the dispatch,
+        # and on the char branch that drops heart-rate values on the floor.
         if iface == CHAR_IFACE and "Value" in changed:
             with self.meta_lock:
                 known = self.char_addr.get(path)
