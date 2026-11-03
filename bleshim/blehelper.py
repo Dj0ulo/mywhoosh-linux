@@ -104,6 +104,10 @@ SERVICES_SETTLE = 5           # seconds before a tree without ServicesResolved w
 # into the radio every five seconds is what kept waking everything up.
 CONNECT_BACKOFF_BASE = 10     # seconds after the first failure
 CONNECT_BACKOFF_MAX = 120     # seconds between attempts at the ladder's top
+# A shim that drops its socket mid-ride is usually back within seconds, and a
+# game that believes itself subscribed never asks again.
+SUBSCRIPTION_GRACE = 30       # seconds subscriptions outlive their client
+HEAL_INTERVAL = 10            # seconds between checks for a dropped subscription
 
 verbose = False
 
@@ -619,6 +623,9 @@ class Quiescence:
             self.failures.pop(addr, None)
 
 
+HEAL = object()     # a worker job of the helper's own, never from the client
+
+
 class Server:
     """One TCP client -- the game -- and the BlueZ state it asks for."""
 
@@ -660,6 +667,11 @@ class Server:
         self.work = queue.Queue()
         self.quiescence = Quiescence()
 
+        # Subscriptions kept for a client that went away (drop_client), and
+        # whether a heal pass is already waiting on the worker.
+        self.grace_timer = None
+        self.heal_queued = False
+
     # ------------------------------------------------------------ transport
 
     def listen(self):
@@ -677,6 +689,7 @@ class Server:
         # The pump that drains the outbox: whatever thread queued a message,
         # the write to the game happens here and nowhere else.
         GLib.timeout_add(30, self.drain_outbox)
+        GLib.timeout_add_seconds(HEAL_INTERVAL, self.schedule_heal)
         log("listening on 127.0.0.1:%d", self.port)
 
     def on_accept(self, sock, condition):
@@ -696,15 +709,20 @@ class Server:
         self.client = conn
         GLib.io_add_watch(conn, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_data)
         log("shim connected")
+        self.cancel_grace()
         return True
 
     def drop_client(self):
-        """Let go of everything the client had asked for.
+        """Let go of what the client had asked for.
 
-        The game going away must not leave a trainer subscribed and a scan
-        running: the next process to use the adapter would inherit both.  Jobs
-        still queued are discarded; the job already running on the worker
-        finishes, and its reply finding no client is send()'s no-op.
+        The scan stops now: the next process to use the adapter would
+        inherit it.  Subscriptions are kept for SUBSCRIPTION_GRACE, because a
+        socket that drops mid-ride usually comes back -- a helper restart, a
+        shim reconnect -- and the game, believing itself subscribed, never
+        asks again.  If no client has returned by then, end_grace() stops
+        them.  Jobs still queued are discarded; the job already running on
+        the worker finishes, and its reply finding no client is send()'s
+        no-op.
         """
         if self.client is not None:
             try:
@@ -719,18 +737,42 @@ class Server:
         except queue.Empty:
             pass
         with self.meta_lock:
-            subs = [(key, self.sub_path.get(key)) for key in self.subscribed]
-        for (addr, uuid), path in subs:
-            try:
-                self.main_bluez.notify(addr, uuid, False, path)
-            except (BleError, dbus.DBusException):
-                pass
+            self.heal_queued = False        # if one was queued, it just went
+            self.silent.clear()
+        self.start_grace()
+        self.stop_scan()
+
+    def start_grace(self):
         with self.meta_lock:
+            kept = len(self.subscribed)
+        if kept and self.grace_timer is None:
+            self.grace_timer = GLib.timeout_add_seconds(SUBSCRIPTION_GRACE, self.end_grace)
+            log("keeping %d subscription(s) for %ds for the client to return", kept, SUBSCRIPTION_GRACE)
+
+    def cancel_grace(self):
+        if self.grace_timer is not None:
+            GLib.source_remove(self.grace_timer)
+            self.grace_timer = None
+            log("client back within the grace period; subscriptions kept")
+
+    def end_grace(self):
+        """No client came back: stop what it had subscribed to.  Main loop."""
+        self.grace_timer = None
+        if self.client is not None:
+            return False
+        with self.meta_lock:
+            subs = [(key, self.sub_path.get(key)) for key in self.subscribed]
             self.subscribed.clear()
             self.sub_path.clear()
             self.char_addr.clear()
-            self.silent.clear()
-        self.stop_scan()
+        for (addr, uuid), path in subs:
+            try:
+                self.main_bluez.notify(addr, uuid, False, path)
+            except (BleError, dbus.DBusException) as e:
+                trace("StopNotify(%s, %s): %s", addr, uuid, e)
+        if subs:
+            log("no client returned; stopped %d subscription(s)", len(subs))
+        return False
 
     def on_data(self, conn, condition):
         if condition & (GLib.IO_HUP | GLib.IO_ERR):
@@ -949,7 +991,9 @@ class Server:
             log("worker cannot open its D-Bus connection (%s) -- slow operations will fail", e)
             while True:
                 req, rid = self.work.get()
-                self.post({"id": rid, "ok": False, "error": "helper's worker thread lost its D-Bus connection"})
+                if req is not HEAL:
+                    self.post({"id": rid, "ok": False,
+                               "error": "helper's worker thread lost its D-Bus connection"})
             return
         # The worker reports the shared scan flag and asks the Server to flip
         # it; the D-Bus half of that toggle rides this thread's own handle.
@@ -957,6 +1001,9 @@ class Server:
 
         while True:
             req, rid = self.work.get()
+            if req is HEAL:
+                self.run_heal()
+                continue
             op = req.get("op")
             addr = (req.get("addr") or "").upper()
             try:
@@ -1042,6 +1089,115 @@ class Server:
             return {}
 
         raise BleError("unknown op %r" % op)
+
+    # ---------------------------------------------------------- heal/restore
+
+    def schedule_heal(self):
+        """Queue a heal pass on the worker.  Main loop, every HEAL_INTERVAL.
+
+        Only while a client is connected: without one, nobody reads the
+        values, and the grace period is deciding whether to stop them.  The
+        pass itself runs on the worker, which owns the slow D-Bus calls and
+        has its own connection, and at most one waits there at a time.
+        """
+        if self.client is None:
+            return True
+        with self.meta_lock:
+            if not self.subscribed or self.heal_queued:
+                return True
+            self.heal_queued = True
+        self.work.put((HEAL, None))
+        return True
+
+    def run_heal(self):
+        with self.meta_lock:
+            self.heal_queued = False
+        try:
+            self.heal_notifications(self.worker_bluez)
+        except Exception as e:                       # noqa: BLE001 -- the
+            # worker must outlive a pass that BlueZ answered strangely.
+            log("heal pass failed: %s: %s", type(e).__name__, e)
+
+    def heal_notifications(self, bz):
+        """Re-arm a subscription whose Notifying fell while its link is up.
+
+        A subscription has three keepers: the game's belief, this helper's
+        `subscribed`, and BlueZ's notify session.  A bluetoothd hiccup or a
+        suspend can drop the last while the first two stand, and the game
+        never asks again, so the StartNotify it would have sent comes from
+        here.  Worker thread.
+        """
+        if self.client is None:
+            return
+        with self.meta_lock:
+            subs = [(key, self.sub_path.get(key)) for key in self.subscribed]
+        if not subs:
+            return
+        objs = bz.objects()
+        for (addr, uuid), path in subs:
+            if path not in objs:
+                try:
+                    path = bz.char_path(addr, uuid, "notify")
+                except BleError:
+                    continue
+            ch = objs.get(path, {}).get(CHAR_IFACE)
+            if not ch or ch.get("Notifying"):
+                continue
+            dev = objs.get(bz.device_path(addr, objs), {}).get(DEVICE_IFACE, {})
+            if not dev.get("Connected"):
+                continue                    # reconnecting is the game's call
+            with self.meta_lock:
+                if self.client is None or (addr, uuid) not in self.subscribed:
+                    continue
+            try:
+                used = bz.notify(addr, uuid, True, path)
+            except (BleError, dbus.DBusException) as e:
+                log("re-arming %s %s failed: %s", addr, uuid, e)
+                continue
+            with self.meta_lock:
+                if (addr, uuid) in self.subscribed:
+                    self.sub_path[(addr, uuid)] = used
+                    self.char_addr[used] = (addr, uuid)
+            log("re-armed %s %s, which had stopped notifying", addr, uuid)
+
+    def restore_notifications(self):
+        """Pick up subscriptions BlueZ still reports from a previous helper.
+
+        A restarted helper starts with an empty `subscribed`, which gates
+        off every value, while the game keeps believing it is subscribed.
+        Every characteristic BlueZ reports as Notifying goes back in, and
+        the grace period starts: if no client connects, they are stopped.
+        Main loop, at startup.
+        """
+        bz = self.main_bluez
+        try:
+            objs = bz.objects()
+        except dbus.DBusException as e:
+            log("notify restore: %s", e.get_dbus_message())
+            return
+        devices = {path: str(ifaces[DEVICE_IFACE].get("Address", "")).upper()
+                   for path, ifaces in objs.items()
+                   if path.startswith(bz.adapter_path + "/") and DEVICE_IFACE in ifaces}
+        restored = []
+        with self.meta_lock:
+            for path, ifaces in sorted(objs.items()):
+                ch = ifaces.get(CHAR_IFACE)
+                if not ch or not ch.get("Notifying"):
+                    continue
+                owner = path.rsplit("/", 2)[0]      # dev_*/serviceXXXX/charYYYY
+                addr = devices.get(owner)
+                if not addr:
+                    continue
+                key = (addr, str(ch["UUID"]).lower())
+                self.char_addr[path] = key
+                self.path_addr[owner] = addr
+                self.subscribed.add(key)
+                self.sub_path[key] = path
+                restored.append("%s %s" % key)
+        if restored:
+            log("picked up %d subscription(s) BlueZ still holds: %s",
+                len(restored), ", ".join(restored))
+            self.start_grace()
 
     def addr_of(self, path):
         """The device address behind a BlueZ object path, from memory when we
@@ -1312,6 +1468,7 @@ def main():
                             signal_name="InterfacesRemoved")
     server.refresh_radios()
     server.remember_paths()
+    server.restore_notifications()
     server.listen()
     # The worker thread that takes every potentially slow BlueZ operation: it
     # builds its own D-Bus connection when it starts, which is why it is
