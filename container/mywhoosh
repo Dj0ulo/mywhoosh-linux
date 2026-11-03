@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Run MyWhoosh in a container: podman if there is one, docker otherwise.
+#
+#   mywhoosh              MyWhoosh
+#   mywhoosh --hd         MyWhoosh HD
+#   mywhoosh --shell      a shell in the container instead of the game
+#   mywhoosh --dry-run    print the command instead of running it
+#
+# The image is only the runtime.  The prefix and the game live in a volume per
+# edition (mywhoosh-standard, mywhoosh-hd); the first launch downloads the game
+# into it, and every launch brings it up to the Microsoft Store's version.
+#
+# Passed into the container when set:
+#   MYWHOOSH_AUTO_UPDATE=0      skip the game update at launch
+#   MYWHOOSH_BLE_ADAPTER=hciN   use this Bluetooth adapter (default: auto)
+# Read here:
+#   MYWHOOSH_CONTAINER_TOOL     podman or docker, instead of detecting
+#   MYWHOOSH_IMAGE              another image, e.g. one built from a checkout
+#   MYWHOOSH_WAYLAND=1          Wine's native Wayland driver instead of XWayland
+#   MYWHOOSH_NVIDIA=0           launch even when an NVIDIA card is out of reach
+#   MYWHOOSH_CONTAINER_ARGS     extra arguments for `run`, split on spaces
+set -u
+
+# The image this launcher was released with.  `dist.sh --release` bumps this
+# line, as it does the installers' shim_release: the image's tag is the release.
+shim_release=v0.2.0
+IMAGE="${MYWHOOSH_IMAGE:-ghcr.io/dj0ulo/mywhoosh-linux:$shim_release}"
+
+say()  { echo "[mywhoosh] $*" >&2; }
+warn() { echo "[mywhoosh] WARNING: $*" >&2; }
+die()  { echo "[mywhoosh] $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+edition=standard
+mode=game
+dry=0
+for a in "$@"; do
+    case "$a" in
+    --hd)       edition=hd ;;
+    --shell)    mode=shell ;;
+    --dry-run)  dry=1 ;;
+    -h|--help)  sed -n '2,/^set -u/{/^set -u/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *)          die "unknown argument '$a' (try --help)" ;;
+    esac
+done
+
+# ------------------------------------------------------------- container tool
+tool="${MYWHOOSH_CONTAINER_TOOL:-}"
+# An NVIDIA card is reached through nvidia-container-toolkit, whose current
+# releases describe it in a format (CDI 0.7) that podman reads only from 5.0 on.
+# Ubuntu 24.04 ships podman 4.9: there, docker gets the card and podman cannot.
+nvidia=0
+have nvidia-smi && nvidia-smi -L >/dev/null 2>&1 && nvidia=1
+podman_major() { podman --version 2>/dev/null | grep -oE '[0-9]+' | head -1; }
+if [ -z "$tool" ]; then
+    if have podman && { [ "$nvidia" = 0 ] || [ "$(podman_major)" -ge 5 ] || ! have docker; }; then tool=podman
+    elif have docker; then tool=docker
+    else die "neither podman nor docker is installed"
+    fi
+fi
+case "$tool" in podman|docker) ;; *) die "MYWHOOSH_CONTAINER_TOOL must be podman or docker" ;; esac
+have "$tool" || die "$tool is not installed"
+
+uid=$(id -u)
+gid=$(id -g)
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+volume="mywhoosh-$edition"
+
+args=(run --rm --name "mywhoosh-$edition"
+      -v "$volume:/data"
+      -e "MYWHOOSH_EDITION=$edition"
+      # Where the sockets below are mounted.  Not the host's /run/user/<uid>:
+      # inside, nothing would create it with the right owner.
+      -e XDG_RUNTIME_DIR=/tmp)
+[ -t 0 ] && [ -t 1 ] && args+=(-it)
+
+# ------------------------------------------------------------------ the user
+# The container runs as you, not as root, for three reasons: BlueZ authorises
+# by the uid the bus sees, the X11, Wayland and PulseAudio sockets accept your
+# uid, and the volume's files stay yours.
+#
+# podman (rootless): keep-id maps your uid to the same uid inside.  Required,
+# not just tidy: dbus-python sends the in-container uid in its AUTH EXTERNAL,
+# and the bus rejects one that differs from the uid it sees on the socket.
+#
+# docker (rootful): --user does the same.  Without it the helper would reach
+# BlueZ as root.  docker's default AppArmor profile denies every D-Bus call,
+# Hello included, so the container is unconfined from AppArmor (it is still
+# an unprivileged process with docker's default capabilities and seccomp).
+if [ "$tool" = podman ]; then
+    args+=(--userns=keep-id)
+else
+    args+=(--user "$uid:$gid")
+    if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]; then
+        args+=(--security-opt apparmor=unconfined)
+    fi
+fi
+
+# SELinux (Fedora): a socket under /run cannot be relabelled with :z, so the
+# bus and the display sockets would be denied to container_t.  Untested here --
+# see README.md.
+if [ "$(cat /sys/fs/selinux/enforce 2>/dev/null)" = 1 ]; then
+    args+=(--security-opt label=disable)
+fi
+
+# ------------------------------------------------------------------ Bluetooth
+# The system bus, for BlueZ.  The directory rather than the socket file: a
+# bind of the file keeps the inode it found, so a dbus restart would leave the
+# container holding a dead socket; the directory shows the new one.  Nothing
+# else is needed -- no --privileged, --net=host, capability or host group: the
+# helper and the shim meet on 127.0.0.1 inside the container.
+bus="/run/dbus/system_bus_socket"
+case "${DBUS_SYSTEM_BUS_ADDRESS:-}" in unix:path=*) bus="${DBUS_SYSTEM_BUS_ADDRESS#unix:path=}"; bus="${bus%%,*}" ;; esac
+if [ -S "$bus" ]; then
+    busdir=$(dirname "$(readlink -f "$bus")")
+    args+=(-v "$busdir:/run/dbus" -e "DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/$(basename "$bus")")
+else
+    warn "no D-Bus system bus at $bus -- the game will start, with Bluetooth off"
+fi
+for v in MYWHOOSH_AUTO_UPDATE MYWHOOSH_BLE_ADAPTER; do
+    [ -n "${!v:-}" ] && args+=(-e "$v=${!v}")
+done
+
+# -------------------------------------------------------------------- display
+x11_ok() {
+    local n="${DISPLAY#*:}"; n="${n%%.*}"
+    [ -n "${DISPLAY:-}" ] && [ -S "/tmp/.X11-unix/X$n" ]
+}
+wl_ok() { [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$runtime_dir/$WAYLAND_DISPLAY" ]; }
+
+if [ "${MYWHOOSH_WAYLAND:-0}" = 1 ] && wl_ok || { ! x11_ok && wl_ok; }; then
+    say "display: Wayland ($WAYLAND_DISPLAY), Wine's native driver"
+    args+=(-v "$runtime_dir/$WAYLAND_DISPLAY:/tmp/$WAYLAND_DISPLAY" -e "WAYLAND_DISPLAY=$WAYLAND_DISPLAY")
+elif x11_ok; then
+    say "display: X11 ($DISPLAY)"
+    # The hostname too: an Xauthority cookie is filed under the host's name.
+    args+=(-v /tmp/.X11-unix:/tmp/.X11-unix -e "DISPLAY=$DISPLAY" --hostname "$(uname -n)")
+    xauth="${XAUTHORITY:-$HOME/.Xauthority}"
+    if [ -f "$xauth" ]; then
+        args+=(-v "$xauth:/tmp/.Xauthority:ro" -e XAUTHORITY=/tmp/.Xauthority)
+    else
+        warn "no Xauthority file; if the window does not open, allow local clients with: xhost +SI:localuser:$(id -un)"
+    fi
+else
+    die "no display: neither DISPLAY nor WAYLAND_DISPLAY names a socket"
+fi
+
+# ---------------------------------------------------------------------- audio
+# PulseAudio, or PipeWire through pipewire-pulse: Wine speaks Pulse.  The
+# directory, for the same reason as the bus.  The server checks the client's
+# uid, which is ours.
+if [ -S "$runtime_dir/pulse/native" ]; then
+    args+=(-v "$runtime_dir/pulse:/tmp/pulse" -e PULSE_SERVER=unix:/tmp/pulse/native)
+else
+    warn "no PulseAudio socket at $runtime_dir/pulse/native -- no sound (on PipeWire, install pipewire-pulse)"
+fi
+
+# ------------------------------------------------------------------------ GPU
+# /dev/dri always: Mesa's Vulkan drivers are in the image, for Intel and AMD,
+# and on a hybrid laptop that is the integrated GPU.  docker makes its own
+# device nodes, without the desktop's uaccess ACL, so it also needs the nodes'
+# groups (render, video); podman binds the host's, ACL included.
+if [ -d /dev/dri ]; then
+    args+=(--device /dev/dri)
+    if [ "$tool" = docker ]; then
+        for g in $(stat -c %g /dev/dri/* 2>/dev/null | sort -u); do
+            [ "$g" != 0 ] && args+=(--group-add "$g")
+        done
+    fi
+fi
+# NVIDIA's proprietary driver: its userspace has to come from the host, which is
+# what nvidia-container-toolkit does -- through CDI for podman, through its
+# runtime for docker.
+#
+# Without it the game would get only the integrated GPU, and MyWhoosh refuses
+# that one ("your device does not meet the minimum requirements") -- so this
+# stops and says what to do instead.  MYWHOOSH_NVIDIA=0 launches anyway.
+toolkit_url=https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+if [ "$nvidia" = 1 ] && [ "${MYWHOOSH_NVIDIA:-1}" != 0 ]; then
+    if [ "$tool" = podman ]; then
+        grep -qs 'nvidia.com/gpu' /etc/cdi/*.yaml /etc/cdi/*.json /var/run/cdi/*.yaml /var/run/cdi/*.json ||
+            die "NVIDIA card found, but podman cannot reach it: install nvidia-container-toolkit and run
+            sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml      ($toolkit_url)"
+        [ "$(podman_major)" -ge 5 ] ||
+            die "NVIDIA card found, but podman $(podman --version | grep -oE '[0-9.]+$') is too old to use it (5.0 or newer is needed).
+            Install docker and launch again (it is picked automatically), or set MYWHOOSH_CONTAINER_TOOL=docker."
+        args+=(--device nvidia.com/gpu=all)
+    else
+        docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"nvidia"' ||
+            die "NVIDIA card found, but docker cannot reach it: install nvidia-container-toolkit and run
+            sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker      ($toolkit_url)"
+        args+=(--runtime=nvidia --gpus all)
+    fi
+fi
+
+# ------------------------------------------------------------------------ run
+[ -n "${MYWHOOSH_CONTAINER_ARGS:-}" ] && read -ra extra <<< "$MYWHOOSH_CONTAINER_ARGS" && args+=("${extra[@]}")
+args+=("$IMAGE")
+[ "$mode" = shell ] && args+=(shell)
+
+if [ "$dry" = 1 ]; then
+    printf '%q ' "$tool" "${args[@]}"; echo
+    exit 0
+fi
+
+# Created here rather than by `run`, so it is there to inspect even when the
+# first run fails early.
+"$tool" volume inspect "$volume" >/dev/null 2>&1 || "$tool" volume create "$volume" >/dev/null ||
+    die "could not create the volume $volume"
+exec "$tool" "${args[@]}"

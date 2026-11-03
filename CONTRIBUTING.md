@@ -13,6 +13,7 @@ runs it under Wine and, harder, connects real fitness sensors to it — the game
 | `winmd/` | The declaration-only stubs the game needs to start at all — and the "Bluetooth off" state to fall back to |
 | `tools/` | Small programs that read the game's own bytecode; every decision here comes from them |
 | `lutris/` | The Lutris installers, the script that runs the helper beside the game, and the game updater |
+| `container/` | The container image (runtime only; the game lives in a volume), its entrypoint, and the host launcher |
 | `dist.sh` | Builds the release archive the installers download, and publishes it |
 | `patch/` | The older launch-only patch, no longer installed by anything |
 
