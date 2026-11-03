@@ -112,6 +112,30 @@ namespace MyWhoosh.Ble
             catch (Exception e) { Backend.Log("OpenBike: StopScan failed: " + e.Message); }
         }
 
+        /// The WD_GetNetworkState and WD_GetDirconServiceAvailability exports,
+        /// through ../../exportshim: whether network discovery works.  The
+        /// game's own answers are WahooProgram's isBonjourEnabled and whether
+        /// the Bonjour service is installed -- both false here -- and on false
+        /// its controller button offers to install Bonjour ("Dircon Service
+        /// Unavailable") instead of scanning.  With StartScan redirected here,
+        /// discovery works, so the answer is yes.  Clicking "Yes" on that offer
+        /// would run the game's bonjoursdksetup.exe and open the gate, which is
+        /// the one thing that must not happen.
+        public static bool NetworkState() { return Yes(ref saidNetworkState, "WD_GetNetworkState"); }
+        public static bool DirconServiceAvailable() { return Yes(ref saidDircon, "WD_GetDirconServiceAvailability"); }
+        static bool saidNetworkState, saidDircon;
+
+        static bool Yes(ref bool said, string export)
+        {
+            if (!said)
+            {
+                said = true;
+                try { Backend.Log("OpenBike: the game asked " + export + "; answering yes"); }
+                catch { }
+            }
+            return true;
+        }
+
         /// Called by ../../exportshim once the two exports are redirected.
         /// The shim is started from the Bluetooth path's first types, and the
         /// game may well have initialized OpenBike and asked for its scan
