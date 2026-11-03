@@ -97,6 +97,7 @@ CHAR_IFACE = "org.bluez.GattCharacteristic1"
 
 CONNECT_TIMEOUT = 25          # seconds waiting for a link and its GATT tree
 ADVERT_TIMEOUT = 20           # seconds waiting for a named device to be on the air
+SERVICES_SETTLE = 5           # seconds before a tree without ServicesResolved will do
 # The engine's own reconnect cadence is five seconds.  A failed connect has
 # already cost a twenty-second wait for the device to appear, and BlueZ holds
 # its own ~30 s link timeout before that.  Letting the game fire one of those
@@ -174,11 +175,38 @@ class Bluez:
     def objects(self):
         return self.om.GetManagedObjects()
 
-    def device_path(self, addr):
+    def named_path(self, addr):
+        """The object path BlueZ names after an address, whether or not it exists."""
         return "%s/dev_%s" % (self.adapter_path, addr.upper().replace(":", "_"))
 
+    def device_path(self, addr, objs=None):
+        """The path of the device whose address is `addr`.
+
+        BlueZ names a device's object after the address it was discovered
+        under, and usually that is the address the game holds.  Pairing can
+        change it: a phone advertises under a random address, and once bonded
+        BlueZ swaps `Address` for its identity address while the object keeps
+        the old path.  So when no object carries the name, the one whose
+        `Address` matches is it.  `objs`, when the caller has the tree
+        already, saves enumerating it again; the named path is returned for
+        an address nobody has.
+        """
+        if objs is None:
+            objs = self.objects()
+        named = self.named_path(addr)
+        if named in objs:
+            return named
+        want = addr.upper()
+        prefix = self.adapter_path + "/dev_"
+        for path, ifaces in sorted(objs.items()):
+            d = ifaces.get(DEVICE_IFACE)
+            if d and path.startswith(prefix) and str(d.get("Address", "")).upper() == want:
+                return path
+        return named
+
     def device_props(self, addr):
-        return self.objects().get(self.device_path(addr), {}).get(DEVICE_IFACE, {})
+        objs = self.objects()
+        return objs.get(self.device_path(addr, objs), {}).get(DEVICE_IFACE, {})
 
     def on_air(self, addr):
         """Is this device actually advertising, or merely remembered?
@@ -300,11 +328,13 @@ class Bluez:
         events as if nothing were happening, which is the point.
         """
         host = getattr(self, "host", None)
-        path = self.device_path(addr)
-        if path not in self.objects():
+        objs = self.objects()
+        path = self.device_path(addr, objs)
+        if path not in objs:
             log("waiting to see %s advertising", addr)
             if not self.wait_for_advert(addr, ADVERT_TIMEOUT, host):
                 raise BleError("%s is not on the air (asleep, or out of range)" % addr)
+            path = self.device_path(addr)
 
         props = dbus.Interface(self.bus.get_object(BLUEZ, path), PROPS_IFACE)
         if not props.Get(DEVICE_IFACE, "Connected"):
@@ -328,10 +358,24 @@ class Bluez:
         # The GATT tree takes a moment once the link is up; BlueZ flips
         # ServicesResolved when it is complete.  Polling on this thread's own
         # connection is cheap and free of any main-loop dependency.
-        end = time.monotonic() + CONNECT_TIMEOUT
+        #
+        # A bonded phone's link can come back with its whole tree exported
+        # and ServicesResolved stuck false.  After SERVICES_SETTLE without the
+        # flag, a connected device with services in the tree counts as
+        # resolved.  Not sooner: BlueZ can export a bonded device's cached
+        # tree before it has checked it against the device.
+        start = time.monotonic()
+        end = start + CONNECT_TIMEOUT
+        prefix = path + "/"
         while True:
             try:
                 if props.Get(DEVICE_IFACE, "ServicesResolved"):
+                    break
+                if (time.monotonic() - start >= SERVICES_SETTLE
+                        and props.Get(DEVICE_IFACE, "Connected")
+                        and any(p.startswith(prefix) and SERVICE_IFACE in ifaces
+                                for p, ifaces in self.objects().items())):
+                    log("%s never reported ServicesResolved; using the services it has", addr)
                     break
             except dbus.DBusException:
                 raise BleError("%s went away while resolving its services" % addr)
@@ -344,8 +388,9 @@ class Bluez:
         return name
 
     def disconnect(self, addr):
-        path = self.device_path(addr)
-        if path not in self.objects():
+        objs = self.objects()
+        path = self.device_path(addr, objs)
+        if path not in objs:
             return
         try:
             dbus.Interface(self.bus.get_object(BLUEZ, path), DEVICE_IFACE).Disconnect()
@@ -389,7 +434,7 @@ class Bluez:
         characteristics() decides which instance stands behind the entry.
         """
         objs = self.objects()
-        prefix = self.device_path(addr) + "/"
+        prefix = self.device_path(addr, objs) + "/"
         out, shown = [], set()
         for path, ifaces in sorted(objs.items()):
             svc = ifaces.get(SERVICE_IFACE)
@@ -422,7 +467,7 @@ class Bluez:
     def characteristic_paths(self, addr, service_uuid):
         """(path, {uuid, flags}) for the chosen instance of a service."""
         objs = self.objects()
-        prefix = self.device_path(addr) + "/"
+        prefix = self.device_path(addr, objs) + "/"
         paths = [path for path, ifaces in objs.items()
                  if path.startswith(prefix)
                  and SERVICE_IFACE in ifaces
@@ -454,7 +499,7 @@ class Bluez:
         the one its reads, writes and subscribes reach.
         """
         objs = self.objects()
-        prefix = self.device_path(addr) + "/"
+        prefix = self.device_path(addr, objs) + "/"
         wanted = self.WANT_FLAGS.get(want, set())
         found = []
         for path, ifaces in sorted(objs.items(), reverse=True):
@@ -1179,10 +1224,13 @@ class Server:
         # BlueZ removes a non-bonded device's object when it stops advertising,
         # which is what a sleeping trainer looks like.  The game hears about it
         # as a disconnection, and reconnecting is its decision, not ours.
+        # The object is already gone, so this goes by name and by the address
+        # last seen on it rather than asking BlueZ to find it.
         addr = ""
         with self.meta_lock:
+            known = self.path_addr.get(str(path))
             for a, was in list(self.connected.items()):
-                if self.main_bluez.device_path(a) == path and was:
+                if was and (self.main_bluez.named_path(a) == path or a == known):
                     addr = a
                     self.connected[a] = False
         if addr:
