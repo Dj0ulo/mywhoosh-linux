@@ -827,7 +827,15 @@ namespace Windows.Devices.Bluetooth.GenericAttributeProfile
                                              "char", characteristicUuid.ToString("D"),
                                              "enable", enable);
                     if (reply == null)
+                    {
+                        // Backend logs why for a timeout or a refusal, but not
+                        // for a helper that is simply absent; this line names
+                        // the subscription the game just lost in every case.
+                        Backend.Log((enable ? "subscribe to " : "unsubscribe from ")
+                                    + deviceHandle.Address + "/" + characteristicUuid
+                                    + " failed; the game sees Unreachable");
                         return GattCommunicationStatus.Unreachable;
+                    }
 
                     lock (Subscribed)
                     {
