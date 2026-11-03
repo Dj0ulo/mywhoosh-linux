@@ -62,5 +62,16 @@ class ReaderTests(unittest.TestCase):
         self.assertIn("KeyError", reply["error"])
 
 
+class SignalTests(unittest.TestCase):
+    def test_value_without_invalidated_list_still_reaches_the_game(self):
+        s = server()
+        path = "/org/bluez/hci0/dev_AA/service0010/char0011"
+        s.char_addr[path] = ("AA", "00002a37-0000-1000-8000-00805f9b34fb")
+        s.subscribed.add(("AA", "00002a37-0000-1000-8000-00805f9b34fb"))
+        s.on_properties_changed(helper.CHAR_IFACE, {"Value": [0x00, 72]}, path=path)
+        event = s.post.call_args.args[0]
+        self.assertEqual(event["value"], "0048")
+
+
 if __name__ == "__main__":
     unittest.main()
