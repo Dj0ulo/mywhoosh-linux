@@ -584,8 +584,28 @@ class Server:
                 if line:
                     lines.append(line)
         for line in lines:
-            self.handle(line)
+            try:
+                self.handle(line)
+            except Exception as e:                   # noqa: BLE001 -- the reader
+                # must outlive anything one request can do: if it died here,
+                # every later request would go unanswered while the game waits.
+                log("unhandled on %r: %s: %s", line[:80], type(e).__name__, e)
+                self.refuse_unhandled(line, e)
         return True
+
+    def refuse_unhandled(self, line, e):
+        """Answer a request whose handling blew up, if it carried an id.
+
+        A refusal costs the game one failed call; silence costs it the
+        shim's whole timeout for the same outcome.
+        """
+        try:
+            rid = json.loads(line.decode("utf-8")).get("id")
+        except Exception:                            # noqa: BLE001
+            return
+        if rid is not None:
+            self.send({"id": rid, "ok": False,
+                       "error": "%s: %s" % (type(e).__name__, e)})
 
     def send(self, obj):
         if self.client is None:
@@ -672,6 +692,9 @@ class Server:
         except (ValueError, UnicodeDecodeError) as e:
             log("unparsable request (%s): %r", e, line[:80])
             return
+        if not isinstance(req, dict):
+            log("request is not an object: %r", line[:80])
+            return
 
         rid = req.get("id")
         op = req.get("op")
@@ -707,6 +730,13 @@ class Server:
             except dbus.DBusException as e:
                 log("scan: %s", e.get_dbus_message())
                 self.send({"id": rid, "ok": False, "error": e.get_dbus_message()})
+                return
+            except Exception as e:                   # noqa: BLE001
+                # Every request read owes the shim a reply; anything else
+                # would leave the game waiting out its whole timeout.
+                log("scan: unexpected: %s: %s", type(e).__name__, e)
+                self.send({"id": rid, "ok": False,
+                           "error": "%s: %s" % (type(e).__name__, e)})
                 return
             self.send({"id": rid, "ok": True})
             return
