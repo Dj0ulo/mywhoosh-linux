@@ -1,0 +1,2 @@
+# build.sh puts the release archive here
+*.tar.gz

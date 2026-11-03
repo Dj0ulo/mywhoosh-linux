@@ -99,10 +99,16 @@ fi
 # The installers are release assets too, so a user installs a tested pair
 # rather than whatever the branch looked like today -- which means the tag has
 # to point at the commit that pins it.  Bump first, commit, then publish.
+#
+# So is the container launcher, and its pin is the image's tag: publishing
+# the release is what makes .github/workflows/image.yml build
+# ghcr.io/dj0ulo/mywhoosh-linux:$tag from this archive.  A game release never
+# rebuilds it -- the game lives in the user's volume and updates at launch.
 sed -i "s|^\( *shim_release: \).*|\1$tag|" lutris/*.yml
+sed -i "s|^shim_release=.*|shim_release=$tag|" container/mywhoosh
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo
-    echo "lutris/*.yml now pin $tag, and the tree has uncommitted changes."
+    echo "lutris/*.yml and container/mywhoosh now pin $tag, and the tree has uncommitted changes."
     echo "gh tags the release at HEAD, so commit first and run this again:"
     echo
     echo "    git commit -am 'Release $tag' && ./dist.sh --release $tag"
@@ -111,8 +117,8 @@ fi
 
 gh release create "$tag" \
     --title "$tag" \
-    --notes "$(printf 'Install with:\n\n    lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/download/%s/mywhoosh.yml\n\n```\n%s\n```\n' "$tag" "$(cat "$stage/MANIFEST")")" \
-    "$archive" lutris/mywhoosh.yml lutris/mywhoosh-hd.yml
+    --notes "$(printf 'Install with:\n\n    lutris -i https://github.com/Dj0ulo/mywhoosh-linux/releases/download/%s/mywhoosh.yml\n\nor run it in a container (the image is built from this release and pushed as ghcr.io/dj0ulo/mywhoosh-linux:%s):\n\n    mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/mywhoosh https://github.com/Dj0ulo/mywhoosh-linux/releases/download/%s/mywhoosh && chmod +x ~/.local/bin/mywhoosh && mywhoosh\n\n```\n%s\n```\n' "$tag" "$tag" "$tag" "$(cat "$stage/MANIFEST")")" \
+    "$archive" lutris/mywhoosh.yml lutris/mywhoosh-hd.yml container/mywhoosh
 
 echo
 echo "released $tag"

@@ -60,6 +60,22 @@ Lutris then does everything itself:
 Installing both editions side by side is fine — they are separate games in
 Lutris, with separate prefixes.
 
+### Or in a container (podman or docker)
+
+If you have podman or docker, you need neither Lutris nor Wine: one script runs
+MyWhoosh in a container.
+
+```bash
+mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/mywhoosh https://github.com/Dj0ulo/mywhoosh-linux/releases/latest/download/mywhoosh && chmod +x ~/.local/bin/mywhoosh && mywhoosh
+```
+
+`mywhoosh --hd` runs MyWhoosh HD. The first launch downloads the game into a
+container volume of its own, and each launch updates it, as above. With an
+NVIDIA card you also need
+[nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html),
+and podman 5 or docker. [`container/README.md`](container/README.md) has the
+details.
+
 ## Play
 
 Launch it from Lutris like any other game. The Bluetooth helper starts with it
@@ -115,6 +131,7 @@ they change.
 | Directory | What it is |
 |---|---|
 | [`lutris/`](lutris/README.md) | The Lutris installers, the script that runs the helper beside the game, and the game updater |
+| [`container/`](container/README.md) | The same install as a podman or docker container: the image, its entrypoint and the launcher |
 | [`bleshim/`](bleshim/README.md) | The Bluetooth support: the library the game loads, plus the Linux helper that speaks to BlueZ |
 | [`exportshim/`](exportshim/README.md) | Four game entry points Wine's .NET runtime cannot handle, replaced in memory |
 | [`winmd/`](winmd/README.md) | The same library with Bluetooth switched off — what the game needs just to start |
