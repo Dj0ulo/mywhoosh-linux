@@ -73,5 +73,15 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(event["value"], "0048")
 
 
+class HeartRateTests(unittest.TestCase):
+    def test_decodes_both_widths(self):
+        self.assertEqual(helper.heart_rate_bpm(bytes([0x00, 72])), 72)
+        self.assertEqual(helper.heart_rate_bpm(bytes([0x01, 0x2c, 0x01])), 300)
+
+    def test_short_values_are_zero(self):
+        for v in (b"", b"\x00", b"\x01\x2c"):
+            self.assertEqual(helper.heart_rate_bpm(v), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
