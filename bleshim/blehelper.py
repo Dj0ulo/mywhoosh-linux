@@ -118,6 +118,19 @@ def trace(fmt, *a):
         log(fmt, *a)
 
 
+def heart_rate_bpm(value):
+    """BPM out of a Heart Rate Measurement (2a37) value, 0 if too short.
+
+    Bit 0 of the flags byte says whether the rate is one byte or two
+    (little-endian); only the trace uses this, the game decodes its own.
+    """
+    if len(value) < 2:
+        return 0
+    if value[0] & 0x01:
+        return value[1] | (value[2] << 8) if len(value) >= 3 else 0
+    return value[1]
+
+
 def select_adapter(objects, requested="auto"):
     """Select a powered adapter without assuming Linux assigned it hci0."""
     adapters = {str(path): interfaces[ADAPTER_IFACE]
@@ -969,8 +982,11 @@ class Server:
             with self.meta_lock:
                 if (addr, uuid) not in self.subscribed:
                     return
+            value = bytes(bytearray(changed["Value"]))
+            if verbose and uuid.startswith("00002a37"):
+                trace("value %s heart rate = %d bpm", addr, heart_rate_bpm(value))
             self.post({"ev": "value", "addr": addr, "char": uuid,
-                       "value": bytes(bytearray(changed["Value"])).hex()})
+                       "value": value.hex()})
             return
 
         if iface == ADAPTER_IFACE:
