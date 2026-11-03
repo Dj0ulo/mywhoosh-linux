@@ -194,6 +194,14 @@ attempt and could raise a pairing prompt on a phone. So a failed connect makes
 its address rest 10 s, then 20, 40, up to 120; a success or a disconnect clears
 it. The main loop refuses a resting address before it reaches the worker.
 
+**Subscriptions outlive their client, briefly.** The game subscribes once and
+never asks again, so a socket that drops mid-ride must not take the readings
+with it. When the client goes, the scan stops but subscriptions stay for 30 s;
+a client back in time finds them standing, and otherwise they are stopped. A
+restarted helper picks up whatever BlueZ still reports as `Notifying`, under the
+same grace. While a client is connected, the worker checks every 10 s for a
+subscription whose `Notifying` fell on a connected device, and subscribes it again.
+
 `fakehelper.py` speaks the same protocol over two virtual sensors, with per-op
 `--slow`/`--fail` injection; `TestBle.cs` drives the shim against it.
 BlueZ's real timing is only visible with hardware.
