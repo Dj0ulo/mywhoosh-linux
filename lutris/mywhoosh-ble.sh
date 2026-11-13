@@ -150,6 +150,20 @@ deps_report() {
         say "      package, enabled with:  sudo systemctl enable --now avahi-daemon"
     fi
 
+    # An ANT+ USB stick is optional, and most players have none: say nothing
+    # unless one is plugged in.  The kernel makes it a serial device that is
+    # root:dialout 0660, which the game cannot open without the udev rule.
+    local stick
+    for stick in /dev/serial/by-id/*Dynastream*; do
+        [ -e "$stick" ] || continue
+        if [ -r "$stick" ] && [ -w "$stick" ]; then
+            say "ok    ANT+ stick $(basename "$stick")"
+        else
+            say "note  ANT+ stick found, but you cannot open it -- the game will not see it."
+            say "      TROUBLESHOOTING.md has the one-line udev rule; replug the stick after."
+        fi
+    done
+
     return $ok
 }
 

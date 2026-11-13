@@ -91,6 +91,10 @@ stays usable while it waits.
 Still nothing? [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) goes through it step
 by step.
 
+**ANT+ USB sticks** (Garmin, Dynastream) work too. They need one udev rule
+first, so your user can open the stick; see
+[`TROUBLESHOOTING.md`](TROUBLESHOOTING.md#ant-usb-stick).
+
 ## Using a phone instead
 
 If you would rather bridge your sensors from a phone, the **MyWhoosh Link**
@@ -116,6 +120,7 @@ they change.
 |---|---|
 | [`lutris/`](lutris/README.md) | The Lutris installers, the script that runs the helper beside the game, and the game updater |
 | [`bleshim/`](bleshim/README.md) | The Bluetooth support: the library the game loads, plus the Linux helper that speaks to BlueZ |
+| [`antbridge/`](antbridge/README.md) | The ANT+ support: a `libusb0.dll` that connects the game's ANT library to a USB stick's Linux serial device |
 | [`exportshim/`](exportshim/README.md) | Four game entry points Wine's .NET runtime cannot handle, replaced in memory |
 | [`winmd/`](winmd/README.md) | The same library with Bluetooth switched off — what the game needs just to start |
 | [`tools/`](tools/README.md) | Small programs that read the game's own code, so decisions here are based on it |
