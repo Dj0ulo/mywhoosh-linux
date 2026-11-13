@@ -6,10 +6,10 @@
 #   ./dist.sh --release v2     ... and publish it as a GitHub release
 #
 # The installer runs on a machine with no Mono compiler and no checkout, so it
-# fetches one archive: the three assemblies, the Linux-side helper, and the
-# script that runs it.  One archive on purpose -- the helper and the shim inside
-# the prefix speak a private protocol over loopback, and fetching them
-# separately is how they end up being different builds of it.
+# fetches one archive: the three assemblies, the ANT+ bridge, the Linux-side
+# helper, and the script that runs it.  One archive on purpose -- the helper
+# and the shim inside the prefix speak a private protocol over loopback, and
+# fetching them separately is how they end up being different builds of it.
 #
 # The game updater (lutris/mywhoosh-update.py) resolves downloads with the
 # Microsoft Store downloader the installer uses, so a copy ships beside it --
@@ -43,6 +43,7 @@ version="${tag:-$commit}"
 
 ./bleshim/build.sh
 ./exportshim/build.sh
+./antbridge/build.sh
 
 name="mywhoosh-bleshim-$version"
 stage="build/$name"
@@ -52,6 +53,7 @@ mkdir -p "$stage"
 cp -f bleshim/build/Windows.dll \
       bleshim/build/System.Runtime.WindowsRuntime.dll \
       exportshim/build/MyWhooshShim.dll \
+      antbridge/build/libusb0.dll \
       bleshim/blehelper.py \
       lutris/mywhoosh-ble.sh \
       lutris/mywhoosh-update.py \

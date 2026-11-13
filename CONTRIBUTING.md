@@ -9,6 +9,7 @@ runs it under Wine and, harder, connects real fitness sensors to it — the game
 | Directory | What it is |
 |---|---|
 | `bleshim/` | The Bluetooth stack: a .NET assembly the game loads instead of WinRT, plus a Linux helper speaking BlueZ |
+| `antbridge/` | The ANT+ support: a `libusb0.dll` that connects the game's ANT library to a USB stick's Linux serial device |
 | `exportshim/` | Replaces game entry points wine-mono marshals wrongly, in memory |
 | `winmd/` | The declaration-only stubs the game needs to start at all — and the "Bluetooth off" state to fall back to |
 | `tools/` | Small programs that read the game's own bytecode; every decision here comes from them |

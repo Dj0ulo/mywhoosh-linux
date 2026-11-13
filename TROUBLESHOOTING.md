@@ -78,3 +78,26 @@ for example, has its own setting). The kernel documents the mechanism under
 [USB power management](https://docs.kernel.org/driver-api/usb/power-management.html),
 and your distribution's Bluetooth documentation is the place to look for the
 specifics.
+
+## ANT+ USB stick
+
+A Garmin or Dynastream ANT+ stick works too: pick ANT+ on the game's device
+screen. Linux makes the stick a serial device that only `root` and the
+`dialout` group may open, so the game cannot use it until your user can. One
+udev rule gives the logged-in user access:
+
+```sh
+echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="0fcf", ATTRS{idProduct}=="1008|1009", TAG+="uaccess"' \
+  | sudo tee /etc/udev/rules.d/70-ant-usb.rules
+sudo udevadm control --reload
+```
+
+Unplug the stick and plug it back in. `getfacl /dev/ttyUSB0` should now list
+your user.
+
+If ANT+ stays grey in the game, look for `[antbridge]` lines in `session.log`.
+`cannot open the ANT stick, Windows error 5` means the rule is not in effect
+yet. No `[antbridge]` line at all means the game never found the stick: check
+that `ls /dev/serial/by-id/` shows a `Dynastream` entry. The game also turns
+its *Enable ANT+* setting off after a launch where ANT+ failed, so switch it
+back on once the stick works.

@@ -54,6 +54,8 @@ script:
       # no tree there to put them in.  MONO_PATH is searched first whichever
       # mono runs, and it is read as a Windows path -- hence Z:, which is /.
       MONO_PATH: Z:$GAMEDIR/bleshim
+      # ANT_DLL finds the ANT+ bridge (libusb0.dll) on the Windows PATH
+      WINEPATH: Z:$GAMEDIR/bleshim
   installer:
     - task:
         name: create_prefix
