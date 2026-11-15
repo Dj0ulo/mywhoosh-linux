@@ -66,7 +66,7 @@ wide:
 | `WriteClientCharacteristicConfigurationDescriptorAsync`, `ValueChanged` | `StartNotify` + `PropertiesChanged` on `Value` |
 | `Radio.GetRadiosAsync` | `Adapter1.Powered` |
 
-Three behaviours in the game's IL that are easy to get wrong:
+Four behaviours in the game's IL that are easy to get wrong:
 
 - **An advertisement with no service UUIDs is discarded.**
   `BluetoothProgram::Advertisement_Received` returns immediately when
@@ -87,6 +87,16 @@ Three behaviours in the game's IL that are easy to get wrong:
   it derives after connecting. Nothing in the shim needs to filter by slot, and
   nothing here should start: each sensor is its own device with its own
   connection.
+- **The last control point wins.** `BluetoothSensor::DidDiscoverServicesAsync`
+  walks every characteristic of every service and sets `writeCharacteristic`
+  for each one it can control through. MyWhoosh 6.3 counts Nordic UART's RX
+  (`6e400002-…`) among them, after FTMS's `2ad9`, so a trainer listing NUS
+  (`6e400001-b5a3-f393-e0a9-e50e24dcca9e`) after FTMS — the Van Rysel D500V2
+  does, for its own app — gets every ERG, grade and shift written to NUS,
+  empty, and no ERG toggle (`CheckERGMode` wants `2ad9`). So `services()`
+  leaves NUS out of any device that also has FTMS, and says so once per
+  device. The game only reaches characteristics through their service, so
+  that is enough. Issue #25.
 
 ## wine-mono traps
 

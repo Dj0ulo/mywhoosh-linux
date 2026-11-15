@@ -41,6 +41,7 @@ The previous run is kept beside it as `session.log.prev`.
 | `is being retried too soon` | The sensor failed to connect a moment ago. To avoid waking it over and over, the next try waits a little longer each time, up to two minutes. Wake the sensor and give it that time |
 | The game says Bluetooth is off | The helper is not reachable, or the adapter is off: `bluetoothctl power on` |
 | Lutris is a Flatpak and there is no adapter | The host needs two Python packages; see the Flatpak note in the [README](README.md#before-you-start) |
+| `hiding Nordic UART from the game` | Normal. The trainer has a second control channel besides FTMS that the game would otherwise send its commands to, with no ERG, slopes or shifting as a result ([#25](https://github.com/Dj0ulo/mywhoosh-linux/issues/25)) |
 | The wrong adapter is used, with more than one | The default is the only powered adapter, or `hci0` if several are. Set `MYWHOOSH_BLE_ADAPTER` (for example `hci1`); see [`lutris/README.md`](lutris/README.md) |
 
 When opening an issue, attach `session.log`.

@@ -83,6 +83,7 @@ class FakeBluez:
         bz.adapter_path = ADAPTER
         bz.om = Mock()
         bz.om.GetManagedObjects.side_effect = lambda: self.tree
+        bz.nus_hidden = set()
         return bz
 
     def server(self):
