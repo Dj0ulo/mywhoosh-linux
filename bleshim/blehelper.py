@@ -105,6 +105,9 @@ DEVICE_IFACE = "org.bluez.Device1"
 SERVICE_IFACE = "org.bluez.GattService1"
 CHAR_IFACE = "org.bluez.GattCharacteristic1"
 
+FTMS_SERVICE = "00001826-0000-1000-8000-00805f9b34fb"
+NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"     # Nordic UART
+
 CONNECT_TIMEOUT = 25          # seconds waiting for a link and its GATT tree
 ADVERT_TIMEOUT = 20           # seconds waiting for a named device to be on the air
 SERVICES_SETTLE = 5           # seconds before a tree without ServicesResolved will do
@@ -175,14 +178,16 @@ class Bluez:
 
     One instance per D-Bus connection: dbus-python connections are not
     thread-safe, so the main loop and the worker each carry their own.  This
-    class holds no state of its own -- whatever two threads must agree on, the
-    scan toggle chief among it, lives in the Server that owns both instances.
+    class holds no state that matters -- whatever two threads must agree on,
+    the scan toggle chief among it, lives in the Server that owns both
+    instances.  `nus_hidden` only remembers which devices have been logged.
     """
 
     def __init__(self, bus, adapter):
         self.bus = bus
         self.adapter_path = "/org/bluez/%s" % adapter
         self.om = dbus.Interface(bus.get_object(BLUEZ, "/"), OM_IFACE)
+        self.nus_hidden = set()
 
     # --------------------------------------------------------------- lookup
 
@@ -446,19 +451,29 @@ class Bluez:
         The game keeps its own service map keyed by UUID, and Windows, which
         it was written against, shows a client one object per service.
         characteristics() decides which instance stands behind the entry.
+
+        Nordic UART is left out of a device that also has FTMS (issue #25).
+        The game takes as its control point the last control-capable
+        characteristic it walks past, and MyWhoosh 6.3 counts NUS's 6e400002
+        as one; a trainer that lists NUS after FTMS, as the Van Rysel D500V2
+        does, then gets every ERG, grade and shift written there, empty.
         """
         objs = self.objects()
         prefix = self.device_path(addr, objs) + "/"
-        out, shown = [], set()
+        uuids = []
         for path, ifaces in sorted(objs.items()):
             svc = ifaces.get(SERVICE_IFACE)
             if not svc or not path.startswith(prefix):
                 continue
             uuid = str(svc["UUID"]).lower()
-            if uuid not in shown:
-                shown.add(uuid)
-                out.append({"uuid": uuid})
-        return out
+            if uuid not in uuids:
+                uuids.append(uuid)
+        if FTMS_SERVICE in uuids and NUS_SERVICE in uuids:
+            uuids.remove(NUS_SERVICE)
+            if addr not in self.nus_hidden:
+                self.nus_hidden.add(addr)
+                log("%s has FTMS and Nordic UART; hiding Nordic UART from the game", addr)
+        return [{"uuid": uuid} for uuid in uuids]
 
     @staticmethod
     def instance_score(objs, service_path):
@@ -536,13 +551,17 @@ class Bluez:
 
     def read(self, addr, char_uuid):
         try:
-            value = self.char_at(self.char_path(addr, char_uuid, "read")).ReadValue({})
+            # Typed: after a reconnect the proxy can lack introspection data,
+            # and dbus-python cannot guess a signature for an empty dict.
+            value = self.char_at(self.char_path(addr, char_uuid, "read")).ReadValue(
+                dbus.Dictionary({}, signature="sv"))
         except dbus.DBusException as e:
             raise BleError("ReadValue failed: %s" % e.get_dbus_message())
         return bytes(bytearray(value))
 
     def write(self, addr, char_uuid, value, with_response):
-        options = {"type": "request" if with_response else "command"}
+        options = dbus.Dictionary({"type": "request" if with_response else "command"},
+                                  signature="sv")
         try:
             self.char_at(self.char_path(addr, char_uuid, "write")).WriteValue(
                 dbus.Array(value, signature="y"), options)

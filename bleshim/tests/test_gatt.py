@@ -1,5 +1,8 @@
 """One GATT instance per duplicated UUID, the same one for every op."""
 import unittest
+from unittest.mock import Mock, patch
+
+import dbus
 
 from fakebluez import BODY_LOCATION, HR_MEASUREMENT, HR_SERVICE, FakeBluez, dbus_error, helper
 
@@ -119,6 +122,74 @@ class ServerTests(unittest.TestCase):
         self.notify(True)
         self.s.worker_dispatch("disconnect", {"addr": ADDR})
         self.assertFalse(self.s.sub_path)
+
+
+FTMS = helper.FTMS_SERVICE
+FTMS_CONTROL = "00002ad9-0000-1000-8000-00805f9b34fb"
+NUS = helper.NUS_SERVICE
+NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+
+
+class NordicUartTests(unittest.TestCase):
+    """NUS after FTMS took the game's control point (issue #25)."""
+
+    def trainer(self, ftms=True, nus=True, nus_uuid=NUS):
+        fake = FakeBluez()
+        dev = fake.device(ADDR, Connected=True, ServicesResolved=True)
+        if ftms:
+            fake.char(fake.service(dev, 0x10, FTMS), 0x11, FTMS_CONTROL, ["write", "indicate"])
+        if nus:
+            fake.char(fake.service(dev, 0x20, nus_uuid), 0x21, NUS_RX, ["write", "write-without-response"])
+        return fake
+
+    def test_hidden_beside_ftms(self):
+        bz = self.trainer().handle()
+        self.assertEqual(bz.services(ADDR), [{"uuid": FTMS}])
+
+    def test_matched_whatever_the_case(self):
+        bz = self.trainer(nus_uuid=NUS.upper()).handle()
+        self.assertEqual(bz.services(ADDR), [{"uuid": FTMS}])
+
+    def test_shown_without_ftms(self):
+        bz = self.trainer(ftms=False).handle()
+        self.assertEqual(bz.services(ADDR), [{"uuid": NUS}])
+
+    def test_ftms_alone_is_unchanged(self):
+        bz = self.trainer(nus=False).handle()
+        self.assertEqual(bz.services(ADDR), [{"uuid": FTMS}])
+
+    def test_said_once_per_device(self):
+        bz = self.trainer().handle()
+        with patch.object(helper, "log") as log:
+            bz.services(ADDR)
+            bz.services(ADDR)
+        self.assertEqual(log.call_count, 1)
+
+
+class OptionTypeTests(unittest.TestCase):
+    """Options go out typed: without introspection, dbus-python cannot guess
+    an empty dict at all and guesses a{ss} for a string one."""
+
+    def setUp(self):
+        self.fake = FakeBluez()
+        self.dev, self.locked_hr, self.open_hr = self.fake.watch(ADDR)
+        self.bz = self.fake.handle()
+        self.ch = Mock()
+        self.ch.ReadValue.return_value = []
+        self.bz.char_at = Mock(return_value=self.ch)
+
+    def assert_sv(self, options):
+        self.assertIsInstance(options, dbus.Dictionary)
+        self.assertEqual(options.signature, "sv")
+
+    def test_read_options(self):
+        self.bz.read(ADDR, HR_MEASUREMENT)
+        self.assert_sv(self.ch.ReadValue.call_args[0][0])
+
+    def test_write_options(self):
+        self.fake.props(self.locked_hr, helper.CHAR_IFACE)["Flags"] = ["write"]
+        self.bz.write(ADDR, HR_MEASUREMENT, b"\x00", True)
+        self.assert_sv(self.ch.WriteValue.call_args[0][1])
 
 
 if __name__ == "__main__":
